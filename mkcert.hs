@@ -25,7 +25,7 @@ main = do
                  , ".tls/cert.pem"
                  , "-days"
                  , "365"
-                 , "-nodes"
+                 , "-nodes"  -- maybe remove this?
                  , "-subj"
                  , "/CN=localhost"
                  ] empty

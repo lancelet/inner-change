@@ -15,9 +15,19 @@ cabal-version:       >=1.10
 
 library
   hs-source-dirs:      src
-  exposed-modules:     Lib
-  build-depends:       base >= 4.7 && < 5
   default-language:    Haskell2010
+  exposed-modules:     Network.InnerChange.Proxy
+  build-depends:       base >= 4.7 && < 5
+                     , bytestring
+                     , http-client
+                     , http-client-tls
+                     , http-conduit
+                     , http-proxy
+                     , http-types
+                     , text
+                     , vector
+                     , wai
+                     , warp
 
 executable ich
   hs-source-dirs:      app
@@ -25,6 +35,7 @@ executable ich
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N
   build-depends:       base
                      , inner-change
+                     , optparse-applicative
   default-language:    Haskell2010
 
 test-suite ich-test
