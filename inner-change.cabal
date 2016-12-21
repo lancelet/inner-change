@@ -19,7 +19,7 @@ library
   build-depends:       base >= 4.7 && < 5
   default-language:    Haskell2010
 
-executable inner-change-exe
+executable ich
   hs-source-dirs:      app
   main-is:             Main.hs
   ghc-options:         -threaded -rtsopts -with-rtsopts=-N
@@ -27,7 +27,7 @@ executable inner-change-exe
                      , inner-change
   default-language:    Haskell2010
 
-test-suite inner-change-test
+test-suite ich-test
   type:                exitcode-stdio-1.0
   hs-source-dirs:      test
   main-is:             Spec.hs
