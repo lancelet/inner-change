@@ -22,7 +22,6 @@ library
                      , http-client
                      , http-client-tls
                      , http-conduit
-                     , http-proxy
                      , http-types
                      , text
                      , vector
