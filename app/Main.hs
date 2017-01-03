@@ -1,9 +1,9 @@
 module Main where
 
-import Network.InnerChange.Proxy (runProxyApp)
+import Network.InnerChange.Proxy (runConduitProxyApp)
 
 main :: IO ()
-main = runProxyApp
+main = runConduitProxyApp
 
 {-
 Should be able to reverse-proxy some other server, eg:

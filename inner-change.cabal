@@ -18,7 +18,9 @@ library
   default-language:    Haskell2010
   exposed-modules:     Network.InnerChange.Proxy
   build-depends:       base >= 4.7 && < 5
+                     , blaze-builder
                      , bytestring
+                     , conduit
                      , http-client
                      , http-client-tls
                      , http-conduit
@@ -26,6 +28,7 @@ library
                      , text
                      , vector
                      , wai
+                     , wai-conduit
                      , warp
 
 executable ich

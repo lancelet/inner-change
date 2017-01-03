@@ -2,25 +2,33 @@
 
 module Network.InnerChange.Proxy where
 
-import           Data.ByteString           (ByteString)
-import qualified Data.ByteString           as BS
-import qualified Data.ByteString.Lazy      as LBS
-import           Data.Monoid               ((<>))
-import           Data.Text                 (Text)
-import qualified Data.Text                 as Text
-import qualified Data.Text.Encoding        as Encoding
-import           Debug.Trace               (trace, traceIO)
+import           Data.ByteString             (ByteString)
+import qualified Data.ByteString.Char8       as BS
+import qualified Data.ByteString.Lazy        as LBS
+import           Data.Monoid                 ((<>))
+import           Data.Text                   (Text)
+import qualified Data.Text                   as Text
+import qualified Data.Text.Encoding          as Encoding
+import           Debug.Trace                 (trace, traceIO)
+import           System.Environment          (getEnv)
 
-import qualified Network.HTTP.Client       as Client
-import qualified Network.HTTP.Client.TLS   as TLS
-import qualified Network.HTTP.Conduit      as HConduit
-import qualified Network.HTTP.Types        as Types
-import qualified Network.HTTP.Types.Header as Types
-import qualified Network.Wai               as Wai
-import qualified Network.Wai.Handler.Warp  as Warp
+import qualified Blaze.ByteString.Builder    as BBB
+import qualified Data.Conduit                as Conduit
+
+import qualified Network.HTTP.Client         as Client
+import qualified Network.HTTP.Client.Conduit as HCConduit
+import qualified Network.HTTP.Client.TLS     as TLS
+import qualified Network.HTTP.Conduit        as HConduit
+import qualified Network.HTTP.Simple         as HSimple
+import qualified Network.HTTP.Types          as Types
+import qualified Network.HTTP.Types.Header   as Types
+import qualified Network.Wai                 as Wai
+import qualified Network.Wai.Conduit         as WConduit
+import qualified Network.Wai.Handler.Warp    as Warp
 
 newtype Host = Host Text
 
+{-
 runProxyApp :: IO ()
 runProxyApp = do
     manager <- Client.newManager TLS.tlsManagerSettings
@@ -33,7 +41,22 @@ runProxyApp = do
                      . Warp.setHost "*"
                      $ Warp.setNoParsePath True Warp.defaultSettings
     Warp.runSettings warpSettings app
+-}
 
+runConduitProxyApp :: IO ()
+runConduitProxyApp = do
+    manager <- Client.newManager TLS.tlsManagerSettings
+    host <- (Host . Text.pack) <$> getEnv "REMOTE_HOST"
+    let
+        port = 2319
+        httpsPort = 443
+        app = conduitProxyApp manager host httpsPort
+        warpSettings = Warp.setPort port
+                     . Warp.setHost "*"
+                     $ Warp.setNoParsePath True Warp.defaultSettings
+    Warp.runSettings warpSettings app
+
+{-
 proxyApp :: Client.Manager
          -> Host
          -> Warp.Port
@@ -47,7 +70,25 @@ proxyApp manager host port request sendResponse = do
     traceIO $ show response'
     let response = translateResponse response'
     sendResponse response
+-}
 
+conduitProxyApp :: Client.Manager
+                -> Host
+                -> Warp.Port
+                -> Wai.Application
+conduitProxyApp manager host port request sendResponse = do
+    request' <- toSimpleRequest host port request
+    -- TODO: deal with errors (handle...)
+    Client.withResponse request' manager $ \res -> do
+        let
+            status = HConduit.responseStatus res
+            body = Conduit.mapOutput (Conduit.Chunk . BBB.fromByteString)
+                                     . HCConduit.bodyReaderSource
+                                     $ HConduit.responseBody res
+            headers = HConduit.responseHeaders res
+        sendResponse $ WConduit.responseSource status headers body
+
+{-
 translateResponse :: Client.Response LBS.ByteString
                   -> Wai.Response
 translateResponse cr = Wai.responseLBS status headers body
@@ -80,3 +121,45 @@ translateRequest (Host host) port wr = do
             , Client.requestBody    = body
             }
     return request'
+-}
+
+toSimpleRequest :: Host                  -- ^ destination host
+                -> Warp.Port             -- ^ destination port
+                -> Wai.Request           -- ^ incoming Wai request
+                -> IO (HSimple.Request)  -- ^ outgoing client request
+toSimpleRequest (Host host) port wr = do
+
+    -- parse base request from the passed-in host and raw query string
+    let
+        hostbs = Encoding.encodeUtf8 host
+        baseRequestBs = hostbs <> Wai.rawQueryString wr
+    baseRequest <- (HConduit.parseRequest . BS.unpack) baseRequestBs
+
+    -- configure body
+    let
+        srb = WConduit.sourceRequestBody wr
+        body = case Wai.requestBodyLength wr of
+            Wai.ChunkedBody ->
+                HConduit.requestBodySourceChunkedIO srb
+            Wai.KnownLength l ->
+                HConduit.requestBodySourceIO (fromIntegral l) srb
+
+    -- configure headers
+    let
+        headers = filter dropRequestHeaders (Wai.requestHeaders wr)
+        dropRequestHeaders (k,_) = k `notElem`
+            [ "host"
+            , "content-encoding"
+            , "content-length" ]
+
+    -- translate other parameters of the request
+    let
+        request = baseRequest
+            { HConduit.method         = Wai.requestMethod wr
+            , HConduit.requestHeaders = headers
+            , HConduit.redirectCount  = 0  -- ?
+            , HConduit.decompress     = const True
+            , HConduit.requestBody    = body
+            }
+    
+    return request
