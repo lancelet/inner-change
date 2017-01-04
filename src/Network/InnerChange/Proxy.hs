@@ -2,6 +2,7 @@
 
 module Network.InnerChange.Proxy where
 
+import           Control.Exception           (SomeException, toException, handle)
 import           Data.ByteString             (ByteString)
 import qualified Data.ByteString.Char8       as BS
 import qualified Data.ByteString.Lazy        as LBS
@@ -78,14 +79,23 @@ conduitProxyApp :: Client.Manager
                 -> Wai.Application
 conduitProxyApp manager host port request sendResponse = do
     request' <- toSimpleRequest host port request
+    traceIO "Request:"
+    traceIO $ show request'
     -- TODO: deal with errors (handle...)
-    Client.withResponse request' manager $ \res -> do
+    let
+        errorResponse :: SomeException -> Wai.Response
+        errorResponse = defaultExceptionResponse . toException
+    handle (sendResponse . errorResponse) $
+        Client.withResponse request' manager $ \res -> do
         let
             status = HConduit.responseStatus res
             body = Conduit.mapOutput (Conduit.Chunk . BBB.fromByteString)
                                      . HCConduit.bodyReaderSource
                                      $ HConduit.responseBody res
             headers = HConduit.responseHeaders res
+        traceIO "Responding with a chunk:"
+        traceIO $ show status
+        traceIO $ show headers
         sendResponse $ WConduit.responseSource status headers body
 
 {-
@@ -123,6 +133,12 @@ translateRequest (Host host) port wr = do
     return request'
 -}
 
+defaultExceptionResponse :: SomeException -> Wai.Response
+defaultExceptionResponse e =
+    Wai.responseLBS Types.internalServerError500
+      [ (Types.hContentType, "text/plain; charset=utf-8") ]
+      $ LBS.fromChunks [ BS.pack $ show e ]
+
 toSimpleRequest :: Host                  -- ^ destination host
                 -> Warp.Port             -- ^ destination port
                 -> Wai.Request           -- ^ incoming Wai request
@@ -130,10 +146,11 @@ toSimpleRequest :: Host                  -- ^ destination host
 toSimpleRequest (Host host) port wr = do
 
     -- parse base request from the passed-in host and raw query string
+    -- TODO: probably don't parseRequest, but instead built it up
     let
         hostbs = Encoding.encodeUtf8 host
-        baseRequestBs = hostbs <> Wai.rawQueryString wr
-    baseRequest <- (HConduit.parseRequest . BS.unpack) baseRequestBs
+        -- baseRequestBs = hostbs <> Wai.rawQueryString wr
+    -- baseRequest <- (HConduit.parseRequest . BS.unpack) baseRequestBs
 
     -- configure body
     let
@@ -149,16 +166,22 @@ toSimpleRequest (Host host) port wr = do
         headers = filter dropRequestHeaders (Wai.requestHeaders wr)
         dropRequestHeaders (k,_) = k `notElem`
             [ "host"
-            , "content-encoding"
-            , "content-length" ]
+            -- remove content-encoding and content-length if decompressed
+            {-, "content-encoding"
+              , "content-length" -} ]
 
     -- translate other parameters of the request
     let
-        request = baseRequest
-            { HConduit.method         = Wai.requestMethod wr
+        request = HConduit.defaultRequest
+            { HConduit.host           = hostbs
+            , HConduit.port           = port
+            , HConduit.secure         = True
+            , HConduit.method         = Wai.requestMethod wr
+            , HConduit.path           = Wai.rawPathInfo wr
+            , HConduit.queryString    = Wai.rawQueryString wr
             , HConduit.requestHeaders = headers
             , HConduit.redirectCount  = 0  -- ?
-            , HConduit.decompress     = const True
+            , HConduit.decompress     = const False
             , HConduit.requestBody    = body
             }
     
