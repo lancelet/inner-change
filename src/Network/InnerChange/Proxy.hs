@@ -27,26 +27,14 @@ import qualified Network.Wai                 as Wai
 import qualified Network.Wai.Conduit         as WConduit
 import qualified Network.Wai.Handler.Warp    as Warp
 
+
 newtype Host = Host Text
 
-{-
-runProxyApp :: IO ()
-runProxyApp = do
-    manager <- Client.newManager TLS.tlsManagerSettings
-    let
-        port = 2319
-        host = Host "www.blender.org"
-        httpsPort = 443
-        app = proxyApp manager host httpsPort
-        warpSettings = Warp.setPort port
-                     . Warp.setHost "*"
-                     $ Warp.setNoParsePath True Warp.defaultSettings
-    Warp.runSettings warpSettings app
--}
 
 runConduitProxyApp :: IO ()
 runConduitProxyApp = do
     manager <- Client.newManager TLS.tlsManagerSettings
+    -- TODO: pass-in the remote host and port
     host <- (Host . Text.pack) <$> getEnv "REMOTE_HOST"
     let
         port = 2319
@@ -57,21 +45,6 @@ runConduitProxyApp = do
                      $ Warp.setNoParsePath True Warp.defaultSettings
     Warp.runSettings warpSettings app
 
-{-
-proxyApp :: Client.Manager
-         -> Host
-         -> Warp.Port
-         -> Wai.Application
-proxyApp manager host port request sendResponse = do
-    request' <- translateRequest host port request
-    traceIO "Request:"
-    traceIO $ show request'
-    response' <- Client.httpLbs request' manager
-    traceIO "Response:"
-    traceIO $ show response'
-    let response = translateResponse response'
-    sendResponse response
--}
 
 conduitProxyApp :: Client.Manager
                 -> Host
@@ -81,57 +54,15 @@ conduitProxyApp manager host port request sendResponse = do
     request' <- toSimpleRequest host port request
     traceIO "Request:"
     traceIO $ show request'
-    -- TODO: deal with errors (handle...)
     let
         errorResponse :: SomeException -> Wai.Response
         errorResponse = defaultExceptionResponse . toException
     handle (sendResponse . errorResponse) $
-        Client.withResponse request' manager $ \res -> do
-        let
-            status = HConduit.responseStatus res
-            body = Conduit.mapOutput (Conduit.Chunk . BBB.fromByteString)
-                                     . HCConduit.bodyReaderSource
-                                     $ HConduit.responseBody res
-            headers = HConduit.responseHeaders res
+        Client.withResponse request' manager $ \response -> do
         traceIO "Responding with a chunk:"
-        traceIO $ show status
-        traceIO $ show headers
-        sendResponse $ WConduit.responseSource status headers body
-
-{-
-translateResponse :: Client.Response LBS.ByteString
-                  -> Wai.Response
-translateResponse cr = Wai.responseLBS status headers body
-  where
-    status  = Client.responseStatus cr
-    headers = filter dropResponseHeaders $ Client.responseHeaders cr
-    body    = Client.responseBody cr
-    dropResponseHeaders (k,_) = k `notElem` ["content-encoding"]
-
-translateRequest :: Host                 -- ^ destination host
-                 -> Warp.Port            -- ^ destination port
-                 -> Wai.Request          -- ^ incoming Wai request
-                 -> IO (Client.Request)  -- ^ outgoing client request
-translateRequest (Host host) port wr = do
-    body <- HConduit.RequestBodyBS
-            <$> LBS.toStrict
-            <$> Wai.strictRequestBody wr
-    let
-        hostbs = Encoding.encodeUtf8 host
-        headers = filter dropRequestHeaders (Wai.requestHeaders wr)
-        dropRequestHeaders (k,_) = k `notElem` ["host"]
-        request' = Client.defaultRequest
-            { Client.method         = Wai.requestMethod wr
-            , Client.secure         = True
-            , Client.host           = hostbs
-            , Client.port           = port
-            , Client.path           = Wai.rawPathInfo wr
-            , Client.requestHeaders = headers
-            , Client.queryString    = Wai.rawQueryString wr
-            , Client.requestBody    = body
-            }
-    return request'
--}
+        traceIO $ show (HConduit.responseStatus response)
+        traceIO $ show (HConduit.responseHeaders response)
+        sendResponse (toWaiConduitResponse response)
 
 defaultExceptionResponse :: SomeException -> Wai.Response
 defaultExceptionResponse e =
@@ -139,19 +70,22 @@ defaultExceptionResponse e =
       [ (Types.hContentType, "text/plain; charset=utf-8") ]
       $ LBS.fromChunks [ BS.pack $ show e ]
 
+
+toWaiConduitResponse :: Client.Response Client.BodyReader -> WConduit.Response
+toWaiConduitResponse cr = WConduit.responseSource status headers body
+  where
+    status  = HConduit.responseStatus cr 
+    headers = HConduit.responseHeaders cr
+    body = Conduit.mapOutput (Conduit.Chunk . BBB.fromByteString)
+                             . HCConduit.bodyReaderSource
+                             $ HConduit.responseBody cr
+
+
 toSimpleRequest :: Host                  -- ^ destination host
                 -> Warp.Port             -- ^ destination port
                 -> Wai.Request           -- ^ incoming Wai request
                 -> IO (HSimple.Request)  -- ^ outgoing client request
 toSimpleRequest (Host host) port wr = do
-
-    -- parse base request from the passed-in host and raw query string
-    -- TODO: probably don't parseRequest, but instead built it up
-    let
-        hostbs = Encoding.encodeUtf8 host
-        -- baseRequestBs = hostbs <> Wai.rawQueryString wr
-    -- baseRequest <- (HConduit.parseRequest . BS.unpack) baseRequestBs
-
     -- configure body
     let
         srb = WConduit.sourceRequestBody wr
@@ -164,25 +98,17 @@ toSimpleRequest (Host host) port wr = do
     -- configure headers
     let
         headers = filter dropRequestHeaders (Wai.requestHeaders wr)
-        dropRequestHeaders (k,_) = k `notElem`
-            [ "host"
-            -- remove content-encoding and content-length if decompressed
-            {-, "content-encoding"
-              , "content-length" -} ]
+        dropRequestHeaders (k,_) = k `notElem` [ "host" ]
 
     -- translate other parameters of the request
-    let
-        request = HConduit.defaultRequest
-            { HConduit.host           = hostbs
+    return HConduit.defaultRequest
+            { HConduit.host           = Encoding.encodeUtf8 host
             , HConduit.port           = port
             , HConduit.secure         = True
             , HConduit.method         = Wai.requestMethod wr
             , HConduit.path           = Wai.rawPathInfo wr
             , HConduit.queryString    = Wai.rawQueryString wr
             , HConduit.requestHeaders = headers
-            , HConduit.redirectCount  = 0  -- ?
             , HConduit.decompress     = const False
             , HConduit.requestBody    = body
             }
-    
-    return request
