@@ -24,11 +24,14 @@ library
                      , bytestring
                      , conduit
                      , containers
+                     , cryptonite
                      , http-client
                      , http-client-tls
                      , http-conduit
                      , http-types
+                     , QuickCheck
                      , text
+                     , utf8-string
                      , vector
                      , wai
                      , wai-conduit
