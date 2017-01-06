@@ -6,15 +6,17 @@ module Network.InnerChange.SoapTypes where
 import qualified Crypto.Hash     as Hash (Digest, SHA1, hash)
 import qualified Data.ByteString.UTF8 as BS (fromString)
 import qualified Data.Map.Strict as Map (empty, singleton, fromList, lookup)
-import           Data.Maybe      (catMaybes, mapMaybe)
+import           Data.Maybe      (catMaybes, mapMaybe, isJust, fromJust)
 import           Data.Monoid     ((<>))
 import           Data.String     (IsString, fromString)
 import           Data.Text       (Text)
 import qualified Data.Text       as T
 import qualified Data.Text.Lazy  as LT (toStrict)
-import qualified Test.QuickCheck as QC (Arbitrary, arbitrary, elements)
+import qualified Test.QuickCheck as QC (Arbitrary, arbitrary, elements, listOf1,
+                                       Gen)
 import qualified Text.XML        as XML (Document (Document), Element (Element),
-                                         Name, Node (NodeContent, NodeElement),
+                                         Name, Node (NodeContent, NodeElement,
+                                                    NodeComment),
                                          Prologue (Prologue), def, renderText,
                                          elementName, elementAttributes,
                                          elementNodes)
@@ -55,6 +57,9 @@ hashInt = Hash.hash . BS.fromString . show
 
 hashToText :: Hash.Digest Hash.SHA1 -> Text
 hashToText = T.pack . show
+
+nonEmptyText :: QC.Gen Text
+nonEmptyText = T.pack <$> QC.listOf1 QC.arbitrary
 
 -------------------------------------------------------------------------------
 
@@ -102,6 +107,25 @@ getOptionalAttr name e = case Map.lookup name (XML.elementAttributes e) of
     Just text -> (FESuccess . Just) text
     Nothing   -> FESuccess Nothing
 
+-- | Returns a successful result containing the text from an element, only if
+-- the element contains *just* text.
+acceptOnlyText :: XML.Element -> FEResult Text
+acceptOnlyText e = if allMatch then FESuccess text else failure
+  where
+    text = mconcat $ fromJust <$> childElements
+    failure = FEFailure $ "Element "
+                       <> elementName
+                       <> "had non-text contents"
+    elementName = T.pack . show $ XML.elementName e
+    allMatch = all isJust childElements
+    childElements = getContent <$> filter notComment (XML.elementNodes e)
+    getContent n = case n of
+        XML.NodeContent t -> Just t
+        _                 -> Nothing
+    notComment n = case n of
+        XML.NodeComment _ -> False
+        _                 -> True
+
 -- | Returns a successful result containing child elements of the specified
 -- name, only if all child elements have the given name.
 acceptOnlyChildrenWithName :: XML.Name -> XML.Element -> FEResult [XML.Element]
@@ -123,6 +147,41 @@ acceptOnlyChildrenWithName name e =
     getElement n = case n of
         XML.NodeElement e -> Just e
         _                 -> Nothing
+
+-- | Returns all child elements with a given name, ignoring elements which
+-- don't have that name.
+getChildElementsWithName :: XML.Name -> XML.Element -> [XML.Element]
+getChildElementsWithName name e = childElements
+  where
+    childElements = mapMaybe getElement (XML.elementNodes e)
+    getElement n = case n of
+        XML.NodeElement e@(XML.Element n _ _) ->
+            if n == name
+            then Just e
+            else Nothing
+        _ -> Nothing
+
+-- | Returns the child element with a given name, which must be unique.
+getUniqueChildElementWithName :: XML.Name -> XML.Element -> FEResult XML.Element
+getUniqueChildElementWithName name e = case getChildElementsWithName name e of
+    [x] -> FESuccess x
+    _   -> FEFailure $ "Did not find exactly one element with name "
+                    <> (T.pack . show) name
+                    <> "."
+
+-- | Returns an optional child element with a given name. If the optional child
+-- element is present, it must be unique.
+getOptionalUniqueChildElementWithName :: XML.Name
+                                      -> XML.Element
+                                      -> FEResult (Maybe XML.Element)
+getOptionalUniqueChildElementWithName name e
+    = case getChildElementsWithName name e of
+          [x] -> FESuccess (Just x)
+          []  -> FESuccess (Nothing)
+          _   -> FEFailure $ "Did not find either zero or one instance of "
+                          <> "an element with name "
+                          <> (T.pack . show) name
+                          <> "."
 
 -------------------------------------------------------------------------------
 
@@ -326,7 +385,7 @@ instance FromElement AdditionalProperties where
     fromElement e = failElement "AdditionalProperties" e
 
 instance QC.Arbitrary AdditionalProperties where
-    arbitrary = AdditionalProperties <$> QC.arbitrary
+    arbitrary = AdditionalProperties <$> QC.listOf1 QC.arbitrary
 
 -------------------------------------------------------------------------------
 
@@ -336,6 +395,8 @@ instance QC.Arbitrary AdditionalProperties where
 --
 -- >>> elemToText . toElement $ IdOnly
 -- "<BaseShape>IdOnly</BaseShape>"
+--
+-- prop> \b -> FESuccess b == (fromElement . toElement) (b :: BaseShape)
 data BaseShape = IdOnly
                | Default
                | AllProperties
@@ -348,6 +409,22 @@ instance ToElement BaseShape where
                       Default       -> "Default"
                       AllProperties -> "AllProperties"
 
+instance FromElement BaseShape where
+    fromElement e@(XML.Element "BaseShape" _ _)
+        = acceptOnlyText e
+      >>= \txt -> case txt of
+                      "IdOnly"        -> FESuccess IdOnly
+                      "Default"       -> FESuccess Default
+                      "AllProperties" -> FESuccess AllProperties
+                      _ -> FEFailure $ "Unexpected contents: \""
+                                    <> txt
+                                    <> "\"; only permitted values are: "
+                                    <> "IdOnly, Default and AllProperties."
+    fromElement e = failElement "BaseShape" e
+
+instance QC.Arbitrary BaseShape where
+    arbitrary = QC.elements [ IdOnly, Default, AllProperties ]
+
 -------------------------------------------------------------------------------
 
 -- | Folder properties to include in a 'GetFolder', 'FindFolder' or
@@ -358,6 +435,8 @@ instance ToElement BaseShape where
 -- >>> let s = FolderShape Default
 -- >>> elemToText . toElement $ FolderShape Default Nothing
 -- "<FolderShape><BaseShape>Default</BaseShape></FolderShape>"
+--
+-- prop> \s -> FESuccess s == (fromElement . toElement) (s :: FolderShape)
 data FolderShape
     = FolderShape BaseShape (Maybe AdditionalProperties)
     deriving (Eq, Show)
@@ -367,6 +446,17 @@ instance ToElement FolderShape where
         = XML.Element "FolderShape" Map.empty
         $ XML.NodeElement <$> catMaybes [Just $ toElement bs, toElement <$> ap]
 
+instance FromElement FolderShape where
+    fromElement e@(XML.Element "FolderShape" _ _) = do
+        bse <- getUniqueChildElementWithName "BaseShape" e
+        bs  <- fromElement bse
+        ape <- getOptionalUniqueChildElementWithName "AdditionalProperties" e
+        ap  <- sequence $ fromElement <$> ape
+        return $ FolderShape bs ap
+
+instance QC.Arbitrary FolderShape where
+    arbitrary = FolderShape <$> QC.arbitrary <*> QC.arbitrary
+
 -------------------------------------------------------------------------------
 
 -- | Name of a mailbox user.
@@ -375,6 +465,8 @@ instance ToElement FolderShape where
 --
 -- >>> elemToText . toElement $ Name "My User"
 -- "<Name>My User</Name>"
+--
+-- prop> \n -> FESuccess n == (fromElement . toElement) (n :: Name)
 data Name = Name Text deriving (Eq, Show)
 
 instance IsString Name where
@@ -383,12 +475,21 @@ instance IsString Name where
 instance ToElement Name where
     toElement (Name n) = txtElement "Name" n
 
+instance FromElement Name where
+    fromElement e@(XML.Element "Name" _ _) = Name <$> acceptOnlyText e
+    fromElement e = failElement "Name" e
+
+instance QC.Arbitrary Name where
+    arbitrary = Name <$> nonEmptyText
+
 -- | Primary SMTP address of a mailbox user.
 --
 -- https://msdn.microsoft.com/en-us/library/office/aa565076(v=exchg.150).aspx
 --
 -- >>> elemToText . toElement $ EmailAddress "some@user.com"
 -- "<EmailAddress>some@user.com</EmailAddress>"
+--
+-- prop> \e -> FESuccess e == (fromElement . toElement) (e :: EmailAddress)
 data EmailAddress = EmailAddress Text deriving (Eq, Show)
 
 instance IsString EmailAddress where
@@ -396,6 +497,13 @@ instance IsString EmailAddress where
 
 instance ToElement EmailAddress where
     toElement (EmailAddress e) = txtElement "EmailAddress" e
+
+instance FromElement EmailAddress where
+    fromElement e@(XML.Element "EmailAddress" _ _)
+        = EmailAddress <$> acceptOnlyText e
+
+instance QC.Arbitrary EmailAddress where
+    arbitrary = EmailAddress <$> nonEmptyText
     
 -- | Type of mailbox.
 --
@@ -403,6 +511,8 @@ instance ToElement EmailAddress where
 --
 -- >>> elemToText . toElement $ MBPublicFolder
 -- "<MailboxType>PublicFolder</MailboxType>"
+--
+-- prop> \b -> FESuccess b == (fromElement . toElement) (b :: MailboxType)
 data MailboxType
     = MBMailbox
     | MBPublicDL
@@ -426,6 +536,33 @@ instance ToElement MailboxType where
                       MBOneOff       -> "OneOff"
                       MBGroupMailbox -> "GroupMailbox"
 
+instance FromElement MailboxType where
+    fromElement e@(XML.Element "MailboxType" _ _)
+        = acceptOnlyText e
+      >>= \txt -> case txt of
+                      "Mailbox"      -> FESuccess MBMailbox
+                      "PublicDL"     -> FESuccess MBPublicDL
+                      "PrivateDL"    -> FESuccess MBPrivateDL
+                      "Contact"      -> FESuccess MBContact
+                      "PublicFolder" -> FESuccess MBPublicFolder
+                      "Unknown"      -> FESuccess MBUnknown
+                      "OneOff"       -> FESuccess MBOneOff
+                      "GroupMailbox" -> FESuccess MBGroupMailbox
+                      _ -> FEFailure $ "Unexpected contents: \""
+                                    <> txt
+                                    <> "."
+    fromElement e = failElement "MailboxType" e
+
+instance QC.Arbitrary MailboxType where
+    arbitrary = QC.elements [ MBMailbox
+                            , MBPublicDL
+                            , MBPrivateDL
+                            , MBContact
+                            , MBPublicFolder
+                            , MBUnknown
+                            , MBOneOff
+                            , MBGroupMailbox ]
+
 -- | Identifies a mail-enabled Active Directory object.
 --
 -- https://msdn.microsoft.com/en-us/library/office/aa565036(v=exchg.150).aspx
@@ -433,6 +570,8 @@ instance ToElement MailboxType where
 -- >>> let b = Mailbox (Just "InBox") (Just "some@user.com") Nothing Nothing
 -- >>> elemToText . toElement $ b
 -- "<Mailbox><Name>InBox</Name><EmailAddress>some@user.com</EmailAddress></Mailbox>"
+--
+-- prop> \m -> FESuccess m == (fromElement . toElement) (m :: Mailbox)
 data Mailbox
     = Mailbox
         (Maybe Name)
@@ -451,6 +590,25 @@ instance ToElement Mailbox where
         , toElement <$> typ
         , toElement <$> id ]
 
+instance FromElement Mailbox where
+    fromElement e@(XML.Element "Mailbox" _ _) = do
+        ne <- getOptionalUniqueChildElementWithName "Name" e
+        ee <- getOptionalUniqueChildElementWithName "EmailAddress" e
+        me <- getOptionalUniqueChildElementWithName "MailboxType" e
+        ie <- getOptionalUniqueChildElementWithName "ItemId" e
+        n <- sequence $ fromElement <$> ne
+        e <- sequence $ fromElement <$> ee
+        m <- sequence $ fromElement <$> me
+        i <- sequence $ fromElement <$> ie
+        return $ Mailbox n e m i
+    fromElement e = failElement "Mailbox" e
+
+instance QC.Arbitrary Mailbox where
+    arbitrary = Mailbox <$> QC.arbitrary
+                        <*> QC.arbitrary
+                        <*> QC.arbitrary
+                        <*> QC.arbitrary
+
 -------------------------------------------------------------------------------
 
 -- | Identifier and change key of a folder.
@@ -460,6 +618,8 @@ instance ToElement Mailbox where
 -- >>> let id = FolderId "ACDC42" (Just "FABB")
 -- >>> elemToText . toElement $ id
 -- "<FolderId ChangeKey=\"FABB\" Id=\"ACDC42\"/>"
+--
+-- prop> \f -> FESuccess f == (fromElement . toElement) (f :: FolderId)
 data FolderId = FolderId Id (Maybe ChangeKey) deriving (Eq, Show)
 
 instance ToElement FolderId where
@@ -469,6 +629,16 @@ instance ToElement FolderId where
               $ catMaybes
               [ Just ("Id", idText id)
               , (\ck -> ("ChangeKey", changeKeyText ck)) <$> mk ]
+
+instance FromElement FolderId where
+    fromElement e@(XML.Element "FolderId" _ _) = do
+        id <- Id <$> getAttr "Id" e
+        ck <- fmap ChangeKey <$> getOptionalAttr "ChangeKey" e
+        return $ FolderId id ck
+    fromElement e = failElement "FolderId" e
+
+instance QC.Arbitrary FolderId where
+    arbitrary = FolderId <$> QC.arbitrary <*> QC.arbitrary
 
 -------------------------------------------------------------------------------
 
