@@ -650,10 +650,17 @@ instance QC.Arbitrary FolderId where
 --
 -- >>> distinguishedFolderToText DFInbox
 -- "inbox"
+--
+-- prop> \df -> FESuccess df == (parseDistinguishedFolder . distinguishedFolderToText) df
 data DistinguishedFolder
     = DFInbox
     | DFRoot
     deriving (Eq, Show)
+
+instance QC.Arbitrary DistinguishedFolder where
+    arbitrary = QC.elements
+                [ DFInbox
+                , DFRoot ]
 
 distinguishedFolderToText :: DistinguishedFolder -> Text
 distinguishedFolderToText f =
@@ -661,16 +668,31 @@ distinguishedFolderToText f =
         DFInbox -> "inbox"
         DFRoot  -> "root"
 
+distinguishedFolderFromText :: Text -> Maybe DistinguishedFolder
+distinguishedFolderFromText txt = case txt of
+    "inbox" -> Just DFInbox
+    "root"  -> Just DFRoot
+    _       -> Nothing
+
+parseDistinguishedFolder :: Text -> FEResult DistinguishedFolder
+parseDistinguishedFolder text = case distinguishedFolderFromText text of
+    Just df -> FESuccess df
+    Nothing -> FEFailure $ "Could not parse "
+                        <> text
+                        <> " as a DistinguishedFolder"
+
 -- | Identifies a distinguished folder that can be referenced by name.
 --
 -- https://msdn.microsoft.com/en-us/library/office/aa580808(v=exchg.150).aspx
 --
 -- >>> let mb = Mailbox Nothing Nothing Nothing Nothing
--- >>> let id = DistinguishedFolderId "ACDC42" Nothing mb
+-- >>> let id = DistinguishedFolderId DFInbox Nothing mb
 -- >>> elemToText . toElement $ id
--- "<DistinguishedFolderId Id=\"ACDC42\"><Mailbox/></DistinguishedFolderId>"
+-- "<DistinguishedFolderId Id=\"inbox\"><Mailbox/></DistinguishedFolderId>"
+--
+-- prop> \d -> FESuccess d == (fromElement . toElement) (d :: DistinguishedFolderId)
 data DistinguishedFolderId
-    = DistinguishedFolderId Id (Maybe ChangeKey) Mailbox
+    = DistinguishedFolderId DistinguishedFolder (Maybe ChangeKey) Mailbox
     deriving (Eq, Show)
 
 instance ToElement DistinguishedFolderId where
@@ -679,9 +701,23 @@ instance ToElement DistinguishedFolderId where
       where
         attrs = Map.fromList
               $ catMaybes
-              [ Just ("Id", idText id)
+              [ Just ("Id", distinguishedFolderToText id)
               , (\ck -> ("ChangeKey", changeKeyText ck)) <$> mk ]
         children = XML.NodeElement <$> [toElement b]
+
+instance FromElement DistinguishedFolderId where
+    fromElement e@(XML.Element "DistinguishedFolderId" _ _) = do
+        id <- getAttr "Id" e >>= parseDistinguishedFolder
+        mk <- getChangeKeyOptionalAttr e
+        mb <- getUniqueChildElementWithName "Mailbox" e >>= fromElement
+        return $ DistinguishedFolderId id mk mb
+    fromElement e = failElement "DistinguishedFolderId" e
+
+instance QC.Arbitrary DistinguishedFolderId where
+    arbitrary = DistinguishedFolderId
+            <$> QC.arbitrary
+            <*> QC.arbitrary
+            <*> QC.arbitrary
 
 -------------------------------------------------------------------------------
 
@@ -691,10 +727,12 @@ instance ToElement DistinguishedFolderId where
 -- https://msdn.microsoft.com/en-us/library/office/aa580509(v=exchg.150).aspx
 --
 -- >>> let mb = Mailbox Nothing Nothing Nothing Nothing
--- >>> let id = DistinguishedFolderId "ACDC" Nothing mb
+-- >>> let id = DistinguishedFolderId DFInbox Nothing mb
 -- >>> let fids = FolderIds [] [id]
 -- >>> elemToText . toElement $ fids
--- "<FolderIds><DistinguishedFolderId Id=\"ACDC\"><Mailbox/></DistinguishedFolderId></FolderIds>"
+-- "<FolderIds><DistinguishedFolderId Id=\"inbox\"><Mailbox/></DistinguishedFolderId></FolderIds>"
+--
+-- prop> \i -> FESuccess i == (fromElement . toElement) (i :: FolderIds)
 data FolderIds = FolderIds [FolderId] [DistinguishedFolderId]
                deriving (Eq, Show)
 
@@ -704,11 +742,26 @@ instance ToElement FolderIds where
         $ XML.NodeElement
       <$> (toElement <$> plain) <> (toElement <$> distinguished)
 
+instance FromElement FolderIds where
+    fromElement e@(XML.Element "FolderIds" _ _) = do
+        let
+            plain         = getChildElementsWithName "FolderId" e
+            distinguished = getChildElementsWithName "DistinguishedFolderId" e
+        ps <- sequence $ fromElement <$> plain
+        ds <- sequence $ fromElement <$> distinguished    
+        return $ FolderIds ps ds
+    fromElement e = failElement "FolderIds" e
+
+instance QC.Arbitrary FolderIds where
+    arbitrary = FolderIds <$> QC.arbitrary <*> QC.arbitrary
+
 -------------------------------------------------------------------------------
 
 -- | Defines a request to get a folder from a mailbox in the Exchange store.
 --
 -- https://msdn.microsoft.com/en-us/library/office/aa580263(v=exchg.150).aspx
+--
+-- prop> \f -> FESuccess f == (fromElement . toElement) (f :: GetFolder)
 data GetFolder = GetFolder FolderShape FolderIds deriving (Show, Eq)
 
 instance ToElement GetFolder where
@@ -717,3 +770,14 @@ instance ToElement GetFolder where
         $ XML.NodeElement
       <$> [ toElement shape
           , toElement ids ]
+
+instance FromElement GetFolder where
+    fromElement e@(XML.Element "GetFolder" _ _) =
+        GetFolder <$> (   getUniqueChildElementWithName "FolderShape" e
+                      >>= fromElement )
+                  <*> (   getUniqueChildElementWithName "FolderIds" e
+                      >>= fromElement )
+    fromElement e = failElement "GetFolder" e
+
+instance QC.Arbitrary GetFolder where
+    arbitrary = GetFolder <$> QC.arbitrary <*> QC.arbitrary
