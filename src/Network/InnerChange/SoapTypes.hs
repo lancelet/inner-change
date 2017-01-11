@@ -1,31 +1,44 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE OverlappingInstances #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Network.InnerChange.SoapTypes where
 
 import qualified Crypto.Hash     as Hash (Digest, SHA1, hash)
 import qualified Data.ByteString.UTF8 as BS (fromString)
-import qualified Data.Map.Strict as Map (empty, singleton, fromList, lookup)
+import           Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map (empty, singleton, fromList, lookup, (!), toList, keys)
 import           Data.Maybe      (catMaybes, mapMaybe, isJust, fromJust)
 import           Data.Monoid     ((<>))
+import           Data.Proxy      (Proxy(Proxy))
 import           Data.String     (IsString, fromString)
 import           Data.Text       (Text)
 import qualified Data.Text       as T
 import qualified Data.Text.Lazy  as LT (toStrict)
+import qualified Data.Tuple      as Tuple (swap)
+import           Data.Word       (Word32)
 import qualified Test.QuickCheck as QC (Arbitrary, arbitrary, elements, listOf1,
                                        Gen)
+import qualified Text.Read       as Read (readMaybe)
 import qualified Text.XML        as XML (Document (Document), Element (Element),
                                          Name, Node (NodeContent, NodeElement,
                                                     NodeComment),
                                          Prologue (Prologue), def, renderText,
                                          elementName, elementAttributes,
-                                         elementNodes)
+                                         elementNodes, nameLocalName)
 
+import Network.InnerChange.Soap.Types
 
 -- $setup
 -- DocTest setup:
 -- >>> :set -XOverloadedStrings
 
+{-
+    
 -------------------------------------------------------------------------------
 
 -- | Renders an XML Element as a Text string.
@@ -61,6 +74,35 @@ hashToText = T.pack . show
 nonEmptyText :: QC.Gen Text
 nonEmptyText = T.pack <$> QC.listOf1 QC.arbitrary
 
+word32ToText :: Word32 -> Text
+word32ToText = T.pack . show . toInteger
+
+textToWord32 :: Text -> Maybe Word32
+textToWord32 = Read.readMaybe . T.unpack
+
+parseWord32 :: Text -> FEResult Word32
+parseWord32 t = case textToWord32 t of
+    Just w  -> FESuccess w
+    Nothing -> FEFailure $ "Could not parse " <> t <> " as a Word32."
+
+invertMap :: (Ord v) => Map k v -> Map v k
+invertMap = Map.fromList . (fmap Tuple.swap) . Map.toList
+
+maybeToFEResult :: Text
+                -> Maybe a
+                -> FEResult a
+maybeToFEResult failMsg ma = case ma of
+    Just result -> FESuccess result
+    Nothing     -> FEFailure failMsg
+
+parseMaybeText :: Text               -- ^ name of thing we're trying to parse
+               -> (Text -> Maybe a)  -- ^ simple Maybe-based parse function
+               -> Text               -- ^ text we're trying to parse
+               -> FEResult a         -- ^ result
+parseMaybeText name f text = maybeToFEResult failMsg (f text)
+  where
+    failMsg = "Could not parse " <> text <> " as a " <> name <> "."
+
 -------------------------------------------------------------------------------
 
 -- | Serialization of some type 'a' to an 'XML.Element'.
@@ -92,6 +134,26 @@ failElement name e =
   where
     eltxt = elemToText e
     nametxt = T.pack $ show $ name
+
+-- | Only processes elements which match the given name; otherwise fail.
+matchElement :: XML.Name                      -- ^ name to match
+             -> (XML.Element -> FEResult a)   -- ^ how to produce a result
+             -> XML.Element                   -- ^ element to match on
+             -> FEResult a                    -- ^ returned result
+matchElement name f e = if eName == name
+                        then f e
+                        else failElement name e
+  where
+    eName = XML.elementName e
+
+-- Only processes elements which match the given name and contain only text.
+matchTxtElement :: XML.Name                 -- ^ name to match
+                -> (Text -> FEResult a)     -- ^ how to produce a result
+                -> XML.Element              -- ^ element to match on
+                -> FEResult a               -- ^ returned result
+matchTxtElement name f e = matchElement name f' e
+  where
+    f' el = acceptOnlyText el >>= f
 
 getAttr :: XML.Name -> XML.Element -> FEResult Text
 getAttr name e = case Map.lookup name (XML.elementAttributes e) of
@@ -215,6 +277,23 @@ getChangeKeyOptionalAttr e = fmap ChangeKey <$> getOptionalAttr "ChangeKey" e
     
 -------------------------------------------------------------------------------
 
+data Attr a = Attr (a -> ())
+
+data IElement a
+    = ITextElement a
+      { itextName   :: XML.Name
+      , itextEncode :: a -> Text
+      , itextDecode :: Text -> Maybe a }
+    | ITextSumElement a
+      { itextSumName :: XML.Name
+      , itextSumMap  :: Map a Text }
+    | IAttrsElement a
+      { iattrsName     :: XML.Name
+      , iattrsRequired :: [Attr]
+      , iattrsOptional :: [Attr] }
+
+-------------------------------------------------------------------------------
+
 -- | Unique identifier and change key of an item in the Exchange store.
 --
 -- https://msdn.microsoft.com/en-us/library/office/aa580234(v=exchg.150).aspx
@@ -234,10 +313,9 @@ instance ToElement ItemId where
               , (\ck -> ("ChangeKey", changeKeyText ck)) <$> km ]
 
 instance FromElement ItemId where
-    fromElement e@(XML.Element "ItemId" attrs []) = 
-        ItemId <$> getIdAttr e
-               <*> getChangeKeyOptionalAttr e
-    fromElement e = failElement "ItemId" e
+    fromElement = matchElement "ItemId" $
+                  \e -> ItemId <$> getIdAttr e
+                               <*> getChangeKeyOptionalAttr e
 
 instance QC.Arbitrary ItemId where
     arbitrary = ItemId <$> QC.arbitrary <*> QC.arbitrary
@@ -254,9 +332,7 @@ instance QC.Arbitrary ItemId where
 -- "<FieldURI FieldURI=\"folder:FolderId\"/>"
 --
 -- prop> \i -> FESuccess i == (fromElement . toElement) (i :: FieldURI)
-data FieldURI
-    = FieldURIFolder FolderProperty
-    deriving (Eq, Show)
+data FieldURI = FieldURIFolder FolderProperty deriving (Eq, Show)
 
 instance ToElement FieldURI where
     toElement x = XML.Element "FieldURI" attr []
@@ -266,8 +342,9 @@ instance ToElement FieldURI where
                    FieldURIFolder p -> folderPropertyToText p
 
 instance FromElement FieldURI where
-    fromElement e@(XML.Element "FieldURI" attrs []) =
-        FieldURIFolder <$> (getAttr "FieldURI" e >>= parseFolderProperty)
+    fromElement = matchElement "FieldURI"
+                $ \e -> FieldURIFolder <$> (   getAttr "FieldURI" e
+                                           >>= parseFolderProperty )
 
 instance QC.Arbitrary FieldURI where
     arbitrary = FieldURIFolder <$> QC.arbitrary
@@ -288,22 +365,27 @@ data FolderProperty
     | FPPermissionSet
     | FPEffectiveRights
     | FPSharingEffectiveRights
-    deriving (Eq, Show)
+    deriving (Eq, Show, Ord)
+
+folderPropertyMap :: Map FolderProperty Text
+folderPropertyMap
+    = Map.fromList 
+    $ fmap (\(k, v) -> (k, "folder:" <> v))
+    [ (FPFolderId                 , "FolderId")
+    , (FPParentFolderId           , "ParentFolderId")
+    , (FPDisplayName              , "DisplayName")
+    , (FPUnreadCount              , "UnreadCount")
+    , (FPTotalCount               , "TotalCount")
+    , (FPChildFolderCount         , "ChildFolderCount")
+    , (FPFolderClass              , "FolderClass")
+    , (FPSearchParameters         , "SearchParameters")
+    , (FPManagedFolderInformation , "ManagedFolderInformation")
+    , (FPPermissionSet            , "PermissionSet")
+    , (FPEffectiveRights          , "EffectiveRights")
+    , (FPSharingEffectiveRights   , "SharingEffectiveRights") ]
 
 instance QC.Arbitrary FolderProperty where
-    arbitrary = QC.elements
-                [ FPFolderId
-                , FPParentFolderId
-                , FPDisplayName
-                , FPUnreadCount
-                , FPTotalCount
-                , FPChildFolderCount
-                , FPFolderClass
-                , FPSearchParameters
-                , FPManagedFolderInformation
-                , FPPermissionSet
-                , FPEffectiveRights
-                , FPSharingEffectiveRights ]
+    arbitrary = QC.elements $ Map.keys folderPropertyMap
 
 -- | Renders a 'FolderProperty' as 'Text'.
 --
@@ -311,47 +393,13 @@ instance QC.Arbitrary FolderProperty where
 --
 -- prop> \fp -> Just fp == (folderPropertyFromText . folderPropertyToText) fp
 folderPropertyToText :: FolderProperty -> Text
-folderPropertyToText x = "folder:" <>
-    case x of
-        FPFolderId                 -> "FolderId"
-        FPParentFolderId           -> "ParentFolderId"
-        FPDisplayName              -> "DisplayName"
-        FPUnreadCount              -> "UnreadCount"
-        FPTotalCount               -> "TotalCount"
-        FPChildFolderCount         -> "ChildFolderCount"
-        FPFolderClass              -> "FolderClass"
-        FPSearchParameters         -> "SearchParameters"
-        FPManagedFolderInformation -> "ManagedFolderInformation"
-        FPPermissionSet            -> "PermissionSet"
-        FPEffectiveRights          -> "EffectiveRights"
-        FPSharingEffectiveRights   -> "SharingEffectiveRights"
+folderPropertyToText = (Map.!) folderPropertyMap
 
 folderPropertyFromText :: Text -> Maybe FolderProperty
-folderPropertyFromText txt =
-    let
-        (prefix, p) = T.splitAt 7 txt
-    in
-        if prefix /= "folder:"
-        then Nothing
-        else case p of
-            "FolderId"                 -> Just FPFolderId
-            "ParentFolderId"           -> Just FPParentFolderId
-            "DisplayName"              -> Just FPDisplayName
-            "UnreadCount"              -> Just FPUnreadCount
-            "TotalCount"               -> Just FPTotalCount
-            "ChildFolderCount"         -> Just FPChildFolderCount
-            "FolderClass"              -> Just FPFolderClass
-            "SearchParameters"         -> Just FPSearchParameters
-            "ManagedFolderInformation" -> Just FPManagedFolderInformation
-            "PermissionSet"            -> Just FPPermissionSet
-            "EffectiveRights"          -> Just FPEffectiveRights
-            "SharingEffectiveRights"   -> Just FPSharingEffectiveRights
-            _                          -> Nothing
+folderPropertyFromText = flip Map.lookup (invertMap folderPropertyMap)
 
 parseFolderProperty :: Text -> FEResult FolderProperty
-parseFolderProperty text = case folderPropertyFromText text of
-    Nothing -> FEFailure $ "Could not parse " <> text <> " as a FolderProperty"
-    Just fp -> FESuccess fp
+parseFolderProperty = parseMaybeText "FolderProperty" folderPropertyFromText
 
 -------------------------------------------------------------------------------
 
@@ -377,12 +425,10 @@ instance ToElement AdditionalProperties where
         $ (XML.NodeElement . toElement) <$> us
 
 instance FromElement AdditionalProperties where
-    fromElement e@(XML.Element "AdditionalProperties" _ uriNodes) =
-        AdditionalProperties <$> fieldURIs
-      where
-        fieldURIs = acceptOnlyChildrenWithName "FieldURI" e
-                >>= sequence . fmap fromElement
-    fromElement e = failElement "AdditionalProperties" e
+    fromElement = matchElement "AdditionalProperties"
+                $ \e -> AdditionalProperties <$>
+                        (   acceptOnlyChildrenWithName "FieldURI" e
+                        >>= sequence . fmap fromElement )
 
 instance QC.Arbitrary AdditionalProperties where
     arbitrary = AdditionalProperties <$> QC.listOf1 QC.arbitrary
@@ -400,30 +446,40 @@ instance QC.Arbitrary AdditionalProperties where
 data BaseShape = IdOnly
                | Default
                | AllProperties
-               deriving (Eq, Show)
+               deriving (Eq, Show, Ord)
 
+instance ElementTextSum BaseShape where
+    elementTextSumName = const "BaseShape"
+    elementTextMap = Map.fromList
+        [ (IdOnly        , "IdOnly")
+        , (Default       , "Default")
+        , (AllProperties , "AllProperties") ]
+{-
+baseShapeToText :: BaseShape -> Text
+baseShapeToText = (Map.!) baseShapeMap
+
+textToBaseShape :: Text -> Maybe BaseShape
+textToBaseShape = flip Map.lookup (invertMap baseShapeMap)
+
+instance QC.Arbitrary BaseShape where
+    arbitrary = QC.elements $ Map.keys baseShapeMap
+
+instance ElementText BaseShape where
+    elementTextName   = const "BaseShape"
+    elementTextEncode = (Map.!) baseShapeMap
+    elementTextDecode = flip Map.lookup (invertMap baseShapeMap)
+-}
+
+{-
 instance ToElement BaseShape where
-    toElement b = txtElement "BaseShape"
-                $ case b of
-                      IdOnly        -> "IdOnly"
-                      Default       -> "Default"
-                      AllProperties -> "AllProperties"
+    toElement b = txtElement "BaseShape" (baseShapeToText b)
 
 instance FromElement BaseShape where
-    fromElement e@(XML.Element "BaseShape" _ _)
-        = acceptOnlyText e
-      >>= \txt -> case txt of
-                      "IdOnly"        -> FESuccess IdOnly
-                      "Default"       -> FESuccess Default
-                      "AllProperties" -> FESuccess AllProperties
-                      _ -> FEFailure $ "Unexpected contents: \""
-                                    <> txt
-                                    <> "\"; only permitted values are: "
-                                    <> "IdOnly, Default and AllProperties."
-    fromElement e = failElement "BaseShape" e
+    fromElement = matchTxtElement "BaseShape" parseBaseShape
 
 instance QC.Arbitrary BaseShape where
     arbitrary = QC.elements [ IdOnly, Default, AllProperties ]
+-}
 
 -------------------------------------------------------------------------------
 
@@ -447,12 +503,14 @@ instance ToElement FolderShape where
         $ XML.NodeElement <$> catMaybes [Just $ toElement bs, toElement <$> ap]
 
 instance FromElement FolderShape where
-    fromElement e@(XML.Element "FolderShape" _ _) = do
-        bse <- getUniqueChildElementWithName "BaseShape" e
-        bs  <- fromElement bse
-        ape <- getOptionalUniqueChildElementWithName "AdditionalProperties" e
-        ap  <- sequence $ fromElement <$> ape
-        return $ FolderShape bs ap
+    fromElement = matchElement "FolderShape"
+                $ \e -> FolderShape
+                        <$> (   getUniqueChildElementWithName "BaseShape" e
+                            >>= fromElement)
+                        <*> (   getOptionalUniqueChildElementWithName
+                                  "AdditionalProperties"
+                                  e
+                            >>= sequence . fmap fromElement)
 
 instance QC.Arbitrary FolderShape where
     arbitrary = FolderShape <$> QC.arbitrary <*> QC.arbitrary
@@ -476,8 +534,7 @@ instance ToElement Name where
     toElement (Name n) = txtElement "Name" n
 
 instance FromElement Name where
-    fromElement e@(XML.Element "Name" _ _) = Name <$> acceptOnlyText e
-    fromElement e = failElement "Name" e
+    fromElement = matchTxtElement "Name" $ FESuccess . Name
 
 instance QC.Arbitrary Name where
     arbitrary = Name <$> nonEmptyText
@@ -499,8 +556,7 @@ instance ToElement EmailAddress where
     toElement (EmailAddress e) = txtElement "EmailAddress" e
 
 instance FromElement EmailAddress where
-    fromElement e@(XML.Element "EmailAddress" _ _)
-        = EmailAddress <$> acceptOnlyText e
+    fromElement = matchTxtElement "EmailAddress" $ FESuccess . EmailAddress
 
 instance QC.Arbitrary EmailAddress where
     arbitrary = EmailAddress <$> nonEmptyText
@@ -522,46 +578,35 @@ data MailboxType
     | MBUnknown
     | MBOneOff
     | MBGroupMailbox
-    deriving (Eq, Show)
+    deriving (Eq, Show, Ord)
+
+mailboxMap :: Map MailboxType Text
+mailboxMap = Map.fromList
+    [ (MBMailbox      , "Mailbox")
+    , (MBPublicDL     , "PublicDL")
+    , (MBPrivateDL    , "PrivateDL")
+    , (MBContact      , "Contact")
+    , (MBPublicFolder , "PublicFolder")
+    , (MBUnknown      , "Unknown")
+    , (MBOneOff       , "OneOff")
+    , (MBGroupMailbox , "GroupMailbox") ]
+
+mailboxTypeToText :: MailboxType -> Text
+mailboxTypeToText mbt = mailboxMap Map.! mbt
+
+textToMailboxType :: Text -> Maybe MailboxType
+textToMailboxType = flip Map.lookup (invertMap mailboxMap)
 
 instance ToElement MailboxType where
-    toElement x = txtElement "MailboxType"
-                $ case x of
-                      MBMailbox      -> "Mailbox"
-                      MBPublicDL     -> "PublicDL"
-                      MBPrivateDL    -> "PrivateDL"
-                      MBContact      -> "Contact"
-                      MBPublicFolder -> "PublicFolder"
-                      MBUnknown      -> "Unknown"
-                      MBOneOff       -> "OneOff"
-                      MBGroupMailbox -> "GroupMailbox"
+    toElement x = txtElement "MailboxType" (mailboxTypeToText x)
 
 instance FromElement MailboxType where
-    fromElement e@(XML.Element "MailboxType" _ _)
-        = acceptOnlyText e
-      >>= \txt -> case txt of
-                      "Mailbox"      -> FESuccess MBMailbox
-                      "PublicDL"     -> FESuccess MBPublicDL
-                      "PrivateDL"    -> FESuccess MBPrivateDL
-                      "Contact"      -> FESuccess MBContact
-                      "PublicFolder" -> FESuccess MBPublicFolder
-                      "Unknown"      -> FESuccess MBUnknown
-                      "OneOff"       -> FESuccess MBOneOff
-                      "GroupMailbox" -> FESuccess MBGroupMailbox
-                      _ -> FEFailure $ "Unexpected contents: \""
-                                    <> txt
-                                    <> "."
-    fromElement e = failElement "MailboxType" e
+    fromElement = matchElement "MailboxType"
+                $ \e -> acceptOnlyText e
+                        >>= (parseMaybeText "MailboxType" textToMailboxType)
 
 instance QC.Arbitrary MailboxType where
-    arbitrary = QC.elements [ MBMailbox
-                            , MBPublicDL
-                            , MBPrivateDL
-                            , MBContact
-                            , MBPublicFolder
-                            , MBUnknown
-                            , MBOneOff
-                            , MBGroupMailbox ]
+    arbitrary = QC.elements $ Map.keys mailboxMap
 
 -- | Identifies a mail-enabled Active Directory object.
 --
@@ -640,6 +685,37 @@ instance FromElement FolderId where
 instance QC.Arbitrary FolderId where
     arbitrary = FolderId <$> QC.arbitrary <*> QC.arbitrary
 
+-------------------------------------------------------------------------------
+
+-- | Identifier and change key of a parent folder.
+--
+-- https://msdn.microsoft.com/en-us/library/office/aa494327(v=exchg.150).aspx
+--
+-- >>> let id = ParentFolderId "ACDC" (Just "FABB")
+-- >>> elemToText . toElement $ id
+-- "<ParentFolderId ChangeKey=\"FABB\" Id=\"ACDC\"/>"
+--
+-- prop> \p -> FESuccess p == (fromElement . toElement) (p :: ParentFolderId)
+data ParentFolderId =
+    ParentFolderId Id (Maybe ChangeKey) deriving (Eq, Show)
+
+instance ToElement ParentFolderId where
+    toElement (ParentFolderId id mk) = XML.Element "ParentFolderId" attrs []
+      where
+        attrs = Map.fromList
+              $ catMaybes
+              [ Just ("Id", idText id)
+              , (\ck -> ("ChangeKey", changeKeyText ck)) <$> mk ]
+
+instance FromElement ParentFolderId where
+    fromElement e@(XML.Element "ParentFolderId" _ _)
+        = ParentFolderId <$> (Id <$> getAttr "Id" e)
+                         <*> (fmap ChangeKey <$> getOptionalAttr "ChangeKey" e)
+    fromElement e = failElement "ParentFolderId" e
+
+instance QC.Arbitrary ParentFolderId where
+    arbitrary = ParentFolderId <$> QC.arbitrary <*> QC.arbitrary
+    
 -------------------------------------------------------------------------------
 
 -- | Distinguished / well-known folders.
@@ -781,3 +857,226 @@ instance FromElement GetFolder where
 
 instance QC.Arbitrary GetFolder where
     arbitrary = GetFolder <$> QC.arbitrary <*> QC.arbitrary
+
+-------------------------------------------------------------------------------
+
+-- | Text description and status of a response.
+--
+-- The 'MessageText' is not required and not included in all responses. It is
+-- usually included when error messages are returned.
+--
+-- https://msdn.microsoft.com/en-us/library/office/aa581040(v=exchg.150).aspx
+--
+-- >>> elemToText . toElement $ MessageText "Hello World"
+-- "<MessageText>Hello World</MessageText>"
+--
+-- prop> \m -> FESuccess m == (fromElement . toElement) (m :: MessageText)
+data MessageText = MessageText Text deriving (Eq, Show)
+
+instance ToElement MessageText where
+    toElement (MessageText text) = txtElement "MessageText" text
+
+instance FromElement MessageText where
+    fromElement e@(XML.Element "MessageText" _ _) =
+        MessageText <$> acceptOnlyText e
+    fromElement e = failElement "MessageText" e
+
+instance QC.Arbitrary MessageText where
+    arbitrary = MessageText <$> nonEmptyText
+
+-------------------------------------------------------------------------------
+
+-- | Response types.
+--
+-- TODO: Complete this data type as required.
+-- 
+-- https://msdn.microsoft.com/en-us/library/office/aa580757(v=exchg.150).aspx
+--
+-- prop> \r -> FESuccess r == (parseResponse . responseToText) r
+data Response
+    = NoError
+    | ErrorAccessDenied
+    | ErrorFolderNotFound
+    deriving (Eq, Show)
+
+instance QC.Arbitrary Response where
+    arbitrary = QC.elements
+        [ NoError
+        , ErrorAccessDenied
+        , ErrorFolderNotFound ]
+
+responseToText :: Response -> Text
+responseToText r = case r of
+    NoError             -> "NoError"
+    ErrorAccessDenied   -> "ErrorAccessDenied"
+    ErrorFolderNotFound -> "ErrorFolderNotFound"
+
+textToResponse :: Text -> Maybe Response
+textToResponse t = case t of
+    "NoError"             -> Just NoError
+    "ErrorAccessDenied"   -> Just ErrorAccessDenied
+    "ErrorFolderNotFound" -> Just ErrorFolderNotFound
+    _                     -> Nothing
+
+parseResponse :: Text -> FEResult Response
+parseResponse t = case textToResponse t of
+    Just r -> FESuccess r
+    Nothing -> FEFailure $ "Could not parse "
+                        <> t
+                        <> " as a Response."
+
+-- | Status information about a request.
+--
+-- https://msdn.microsoft.com/en-us/library/office/aa580757(v=exchg.150).aspx
+--
+-- >>> elemToText . toElement $ ResponseCode NoError
+-- "<ResponseCode>NoError</ResponseCode>"
+--
+-- prop> \r -> FESuccess r == (fromElement . toElement) (r :: ResponseCode)
+data ResponseCode = ResponseCode Response deriving (Eq, Show)
+
+instance ToElement ResponseCode where
+    toElement (ResponseCode r) = txtElement "ResponseCode" (responseToText r)
+
+instance FromElement ResponseCode where
+    fromElement e@(XML.Element "ResponseCode" _ _) =
+        ResponseCode <$> (acceptOnlyText e >>= parseResponse)
+    fromElement e = failElement "ResponseCode" e
+
+instance QC.Arbitrary ResponseCode where
+    arbitrary = ResponseCode <$> QC.arbitrary
+
+-------------------------------------------------------------------------------
+
+-- | The IPF folder class of a folder.
+--
+-- https://msdn.microsoft.com/en-us/library/office/dn535505(v=exchg.150).aspx
+--
+-- prop> \i -> FESuccess i == (parseIPF . ipfToText) i
+data IPF
+    = IPFNote         -- ^ Email messages or folders.
+    | IPFAppointment
+    | IPFContact
+    | IPFTask
+    deriving (Eq, Show)
+
+instance QC.Arbitrary IPF where
+    arbitrary = QC.elements
+                [ IPFNote
+                , IPFAppointment
+                , IPFContact
+                , IPFTask ]
+
+ipfToText :: IPF -> Text
+ipfToText i = case i of
+    IPFNote        -> "IPF.Note"
+    IPFAppointment -> "IPF.Appointment"
+    IPFContact     -> "IPF.Contact"
+    IPFTask        -> "IPF.Task"
+
+textToIPF :: Text -> Maybe IPF
+textToIPF t = case t of
+    "IPF.Note"        -> Just IPFNote
+    "IPF.Appointment" -> Just IPFAppointment
+    "IPF.Contact"     -> Just IPFContact
+    "IPF.Task"        -> Just IPFTask
+    _                 -> Nothing
+
+parseIPF :: Text -> FEResult IPF
+parseIPF t = case textToIPF t of
+    Just ipf -> FESuccess ipf
+    Nothing -> FEFailure $ "Could not parse " <> t <> " as an IPF."
+
+-- | The folder class of a folder.
+--
+-- https://msdn.microsoft.com/en-us/library/office/aa579453(v=exchg.150).aspx
+--
+-- >>> elemToText . toElement $ FolderClass IPFNote
+-- "<FolderClass>IPF.Note</FolderClass>"
+--
+-- prop> \f -> FESuccess f == (fromElement . toElement) (f :: FolderClass)
+data FolderClass = FolderClass IPF deriving (Eq, Show)
+
+instance ToElement FolderClass where
+    toElement (FolderClass ipf) = txtElement "FolderClass" (ipfToText ipf)
+
+instance FromElement FolderClass where
+    fromElement e@(XML.Element "FolderClass" _ _) =
+        FolderClass <$> (acceptOnlyText e >>= parseIPF)
+    fromElement e = failElement "FolderClass" e
+
+instance QC.Arbitrary FolderClass where
+    arbitrary = FolderClass <$> QC.arbitrary
+
+-------------------------------------------------------------------------------
+
+-- | Display name of a folder, contact, distribution list, delegate user,
+-- location or rule.
+--
+-- https://msdn.microsoft.com/en-us/library/office/aa566011(v=exchg.150).aspx
+--
+-- >>> elemToText . toElement $ DisplayName "Inbox"
+-- "<DisplayName>Inbox</DisplayName>"
+--
+-- prop> \d -> FESuccess d == (fromElement . toElement) (d :: DisplayName)
+data DisplayName = DisplayName Text deriving (Eq, Show)
+
+instance ToElement DisplayName where
+    toElement (DisplayName n) = txtElement "DisplayName" n
+
+instance FromElement DisplayName where
+    fromElement e@(XML.Element "DisplayName" _ _)
+        = DisplayName <$> acceptOnlyText e
+    fromElement e = failElement "DisplayName" e
+
+instance QC.Arbitrary DisplayName where
+    arbitrary = DisplayName <$> nonEmptyText
+
+-------------------------------------------------------------------------------
+
+-- | Total count of items within a given folder.
+--
+-- https://msdn.microsoft.com/en-us/library/office/aa565243(v=exchg.150).aspx
+--
+-- >>> elemToText . toElement $ TotalCount 10
+-- "<TotalCount>10</TotalCount>"
+--
+-- prop> \c -> FESuccess c == (fromElement . toElement) (c :: TotalCount)
+data TotalCount = TotalCount Word32 deriving (Eq, Show)
+
+instance ToElement TotalCount where
+    toElement (TotalCount n) = txtElement "TotalCount" (word32ToText n)
+
+instance FromElement TotalCount where
+    fromElement e@(XML.Element "TotalCount" _ _)
+        = TotalCount <$> (acceptOnlyText e >>= parseWord32)
+    fromElement e = failElement "TotalCount" e
+
+instance QC.Arbitrary TotalCount where
+    arbitrary = TotalCount <$> QC.arbitrary
+
+-------------------------------------------------------------------------------
+
+-- | Number of immediate child folders contained within a folder.
+--
+-- https://msdn.microsoft.com/en-us/library/office/aa565882(v=exchg.150).aspx
+--
+-- >>> elemToText . toElement $ ChildFolderCount 42
+-- "<ChildFolderCount>42</ChildFolderCount>"
+--
+-- prop> \c -> FESuccess c == (fromElement . toElement) (c :: ChildFolderCount)
+data ChildFolderCount = ChildFolderCount Word32 deriving (Eq, Show)
+
+instance ToElement ChildFolderCount where
+    toElement (ChildFolderCount n)
+        = txtElement "ChildFolderCount" (word32ToText n)
+
+instance FromElement ChildFolderCount where
+    fromElement e@(XML.Element "ChildFolderCount" _ _)
+        = ChildFolderCount <$> (acceptOnlyText e >>= parseWord32)
+    fromElement e = failElement "ChildFolderCount" e
+
+instance QC.Arbitrary ChildFolderCount where
+    arbitrary = ChildFolderCount <$> QC.arbitrary
+
+-}
