@@ -10,7 +10,7 @@ module Network.InnerChange.Soap.Luke where
 
 import           Network.InnerChange.Soap.Types (AttributeName (AttributeName),
                                                  ElementName (ElementName),
-                                                 FailDetails (FailAttributeMissing, FailAttributeParse, FailMissingElement, FailNotUniqueElement, FailOther, FailTextMissing, FailTextParse),
+                                                 FailDetails (FailAttributeMissing, FailAttributeParse, FailMissingElement, FailNotUniqueElement, FailOther, FailTextParse),
                                                  IsElement, IsText,
                                                  Result (Failure, Success),
                                                  fromElement, fromText,
@@ -159,15 +159,22 @@ instance ( IsText t
          , WithElement rest
          ) => WithElement (Content t :> rest) where
     type UnElement (Content t :> rest) r = t -> UnElement rest r
-    withElement _ f e = textContent e >>= fromTextResult >>= continue
+    withElement _ f e = fromTextResult elName (textContent e) >>= continue
       where
+        elName = ElementName $ XML.elementName e
         continue v = withElement (Proxy :: Proxy rest) (f v) e
 
-fromTextResult :: (IsText t) => Text -> Result t
-fromTextResult = undefined
+fromTextResult :: (IsText t) => ElementName -> Text -> Result t
+fromTextResult elName text = case fromText text of
+    Just value -> Success value
+    Nothing    -> Failure $ FailTextParse elName
 
-textContent :: XML.Element -> Result Text
-textContent e = undefined
+textContent :: XML.Element -> Text
+textContent e = mconcat $ mapMaybe getEls (XML.elementNodes e)
+  where
+    getEls node = case node of
+                      XML.NodeContent text -> Just text
+                      _                    -> Nothing
 
 -------------------------------------------------------------------------------
 

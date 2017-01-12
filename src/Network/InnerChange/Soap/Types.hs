@@ -26,7 +26,6 @@ data FailDetails
     | FailNotUniqueElement ElementName
     | FailAttributeMissing AttributeName
     | FailAttributeParse ElementName (AttributeName, Text)
-    | FailTextMissing ElementName
     | FailTextParse ElementName
     | FailOther Text
     deriving (Eq, Show)
