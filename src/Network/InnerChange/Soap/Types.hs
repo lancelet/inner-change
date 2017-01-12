@@ -18,9 +18,16 @@ import qualified Text.XML                   as XML (Element (Element),
 
 -------------------------------------------------------------------------------
 
+newtype ElementName = ElementName XML.Name deriving (Eq, Show)
+newtype AttributeName = AttributeName XML.Name deriving (Eq, Show)
+
 data FailDetails
-    = FailElement XML.Name XML.Element
-    | FailAttribute XML.Name (XML.Name, Text)
+    = FailMissingElement ElementName
+    | FailNotUniqueElement ElementName
+    | FailAttributeMissing AttributeName
+    | FailAttributeParse ElementName (AttributeName, Text)
+    | FailTextMissing ElementName
+    | FailTextParse ElementName
     | FailOther Text
     deriving (Eq, Show)
 
@@ -41,13 +48,18 @@ instance Monad Result where
 
 -------------------------------------------------------------------------------
 
-class ElementSerialization a where
-    toElement   :: a -> XML.Element
+class IsText t where
+    toText :: t -> Text
+    fromText :: Text -> Maybe t
+
+class IsElement a where
+    classElementName :: Proxy a -> ElementName
+    toElement :: a -> XML.Element
     fromElement :: XML.Element -> Result a
+
+instance IsText Text where
+    toText = id
+    fromText = Just . id
 
 -------------------------------------------------------------------------------
 
-elementsGenGen :: forall a. (G.Generic a) => Proxy a -> QC.Gen a
-elementsGenGen proxy = undefined
-  where
-    x = G.from proxy

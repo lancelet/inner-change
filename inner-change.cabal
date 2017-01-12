@@ -19,6 +19,7 @@ library
   exposed-modules:     Network.InnerChange.Proxy
                      , Network.InnerChange.SoapTypes
                      , Network.InnerChange.Soap.Types
+                     , Network.InnerChange.Soap.Luke
   build-depends:       base >= 4.7 && < 5
                      , blaze-builder
                      , blaze-markup
