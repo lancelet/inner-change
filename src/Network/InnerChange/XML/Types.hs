@@ -59,20 +59,20 @@ import qualified Text.XML     as XML (Element (Element), Name (Name),
 --     - an XML attribute (ie. '<SomeElement attribute="value_goes_here"/>')
 --     - text of an XML node (ie. '<SomeElement>value_goes_here</SomeElement>')
 class IsText a where
-    toText   :: a    -> Text
+    toText :: a -> Text
     fromText :: Text -> Maybe a
 
 -- | Encoding of a type 'a' as an XML 'Element'.
 class IsElement a where
-    toElement   :: NameMapping -> a -> XML.Element
+    toElement :: a -> XML.Element
     -- fromElement :: XML.Element -> Result a
 
-    default toElement :: (Generic a, GIsElement (Rep a)) => NameMapping -> a -> XML.Element
-    toElement nmap a = gToElement nmap $ from a
+    default toElement :: (Generic a, GIsElement (Rep a)) => a -> XML.Element
+    toElement a = gToElement $ from a
 
 -- | Encoding for a type 'a' as an XML 'Node'.
 class IsNode a where
-    toNode   :: NameMapping -> a -> XML.Node
+    toNode :: a -> XML.Node
     -- fromNode :: XML.Element -> XML.Node -> Result a
 
 -------------------------------------------------------------------------------
@@ -86,7 +86,7 @@ instance IsText Int where
     fromText = error "Not implemented: IsText Int fromText"
 
 instance {-# OVERLAPS #-} IsNode Text where
-    toNode _ t = XML.NodeContent t
+    toNode = XML.NodeContent
 
 -------------------------------------------------------------------------------
 
@@ -130,25 +130,9 @@ maybeResult f m = maybe (Failure f) Success m
 
 -------------------------------------------------------------------------------
 
-data NameMapping
-    = NameMapping
-    { toName   :: Text     -> XML.Name
-    , fromName :: XML.Name -> Text }
-
-simpleToName :: Text -> XML.Name
-simpleToName t = XML.Name t Nothing Nothing
-
-simpleFromName :: XML.Name -> Text
-simpleFromName n = case n of
-    XML.Name t Nothing Nothing -> t
-    _ -> error "simpleFromName: constructor form not applicable"
-
-simpleNameMapping :: NameMapping
-simpleNameMapping = NameMapping simpleToName simpleFromName
-
-symbolText :: (KnownSymbol s) => Proxy s -> Text
-symbolText = Text.pack . symbolVal
-
+symbolName :: (KnownSymbol s) => Proxy s -> XML.Name
+symbolName p = XML.Name (Text.pack $ symbolVal p) Nothing Nothing
+    
 -------------------------------------------------------------------------------
 
 newtype Attr a = Attr { unAttr :: a } deriving (Eq, Show, Generic)
@@ -160,20 +144,20 @@ newtype Attr a = Attr { unAttr :: a }
 -}
 
 class GIsElement a where
-    gToElement :: NameMapping -> a x -> XML.Element
+    gToElement :: a x -> XML.Element
 
 instance ( KnownSymbol n
          , GAttrs c
          , GNodes c
          ) => GIsElement (D1 ('MetaData n x y z) c) where
-    gToElement nmap (M1 c) = XML.Element name attrs nodes
+    gToElement (M1 c) = XML.Element name attrs nodes
       where
-        name  = toName nmap (symbolText (Proxy :: Proxy n))
-        attrs = ggetAttrs nmap c
-        nodes = ggetNodes nmap c
+        name  = symbolName (Proxy :: Proxy n)
+        attrs = ggetAttrs c
+        nodes = ggetNodes c
 
 instance IsElement a => IsNode a where
-    toNode nmap e = XML.NodeElement $ toElement nmap e
+    toNode = XML.NodeElement . toElement
     {-
     fromNode e n = case n of
         XML.NodeElement e' -> fromElement e'
@@ -181,45 +165,45 @@ instance IsElement a => IsNode a where
     -}
 
 class GAttrs a where
-    ggetAttrs :: NameMapping -> a x -> Map XML.Name Text
+    ggetAttrs :: a x -> Map XML.Name Text
 
 instance GAttrs (C1 ('MetaCons name q w) U1) where
-    ggetAttrs _ = mempty
+    ggetAttrs = mempty
 
 instance GAttrs s => GAttrs (C1 ('MetaCons name q w) s) where
-    ggetAttrs nmap (M1 sel) = ggetAttrs nmap sel
+    ggetAttrs (M1 sel) = ggetAttrs sel
 
 instance GAttrs (S1 ('MetaSel ('Just name) q w e) (Rec0 a)) where
-    ggetAttrs _ = mempty
+    ggetAttrs = mempty
 
 instance {-# OVERLAPS #-}
          ( KnownSymbol n
          , IsText a
          ) => GAttrs (S1 ('MetaSel ('Just n) q w e) (Rec0 (Attr a))) where
-    ggetAttrs nmap (M1 (K1 (Attr x))) = Map.singleton name (toText x)
+    ggetAttrs (M1 (K1 (Attr x))) = Map.singleton name (toText x)
       where
-        name = toName nmap (symbolText (Proxy :: Proxy n))
+        name = symbolName (Proxy :: Proxy n)
 
 instance (GAttrs a, GAttrs b) => GAttrs (a :*: b) where
-    ggetAttrs nmap (a :*: b) = Map.union (ggetAttrs nmap a) (ggetAttrs nmap b)
+    ggetAttrs (a :*: b) = Map.union (ggetAttrs a) (ggetAttrs b)
 
 
 class GNodes a where
-    ggetNodes :: NameMapping -> a x -> [XML.Node]
+    ggetNodes :: a x -> [XML.Node]
 
 instance GNodes s => GNodes (C1 ('MetaCons name q w) s) where
-    ggetNodes nmap (M1 sel) = ggetNodes nmap sel
+    ggetNodes (M1 sel) = ggetNodes sel
 
 instance {-# OVERLAPPING #-}
          IsText a
          => GNodes (S1 ('MetaSel ('Just name) q w e) (Rec0 (Attr a))) where
-    ggetNodes _ (M1 (K1 (Attr x))) = []
+    ggetNodes (M1 (K1 (Attr x))) = []
 
 instance IsNode a => GNodes (S1 ('MetaSel ('Just name) q w e) (Rec0 a)) where
-    ggetNodes nmap (M1 (K1 x)) = [toNode nmap x]
+    ggetNodes (M1 (K1 x)) = [toNode x]
 
 instance (GNodes a, GNodes b) => GNodes (a :*: b) where
-    ggetNodes nmap (a :*: b) = ggetNodes nmap a ++ ggetNodes nmap b
+    ggetNodes (a :*: b) = ggetNodes a ++ ggetNodes b
 
 
 data X = X
