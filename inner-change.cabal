@@ -20,6 +20,7 @@ library
                      , Network.InnerChange.SoapTypes
                      , Network.InnerChange.Soap.Types
                      , Network.InnerChange.Soap.Luke
+                     , Network.InnerChange.XML.Types
   build-depends:       base >= 4.7 && < 5
                      , blaze-builder
                      , blaze-markup
