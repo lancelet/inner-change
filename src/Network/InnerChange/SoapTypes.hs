@@ -1,12 +1,6 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE OverlappingInstances #-}
-{-# LANGUAGE TemplateHaskell #-}
-
 module Network.InnerChange.SoapTypes where
+
+{-
 
 import qualified Crypto.Hash     as Hash (Digest, SHA1, hash)
 import qualified Data.ByteString.UTF8 as BS (fromString)
@@ -37,7 +31,6 @@ import Network.InnerChange.Soap.Types
 -- DocTest setup:
 -- >>> :set -XOverloadedStrings
 
-{-
     
 -------------------------------------------------------------------------------
 

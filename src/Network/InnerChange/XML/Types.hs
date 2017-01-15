@@ -1,3 +1,4 @@
+-- {-# OPTIONS_GHC -Wwarn #-}
 {-# LANGUAGE DataKinds            #-}
 {-# LANGUAGE DefaultSignatures    #-}
 {-# LANGUAGE DeriveFunctor        #-}
@@ -10,7 +11,6 @@
 {-# LANGUAGE TypeFamilies         #-}
 {-# LANGUAGE TypeOperators        #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE TypeApplications     #-}
 
 module Network.InnerChange.XML.Types
     ( -- * Classes
@@ -21,6 +21,7 @@ module Network.InnerChange.XML.Types
     , ToNode (toNode)
     , FromNode (fromNode)
       -- * Types
+    , Attr (unAttr)
     , Result (Success, Failure)
     , FailureDetails
         ( FailureExpectedElement
@@ -39,28 +40,31 @@ module Network.InnerChange.XML.Types
       -- * Generics
     , genericToElement
     , genericFromElement
+    , genericSumTypeToElement
+    , genericSumTypeFromElement
       -- * Helpers
     , toTextToNode
     , fromTextFromNode
+    , showText
+    , readMaybeText
     ) where
 
-import           Data.Map     (Map)
-import qualified Data.Map     as Map (singleton, union, lookup)
-import           Data.Maybe   (mapMaybe, fromMaybe, catMaybes)
-import           Data.Monoid  ((<>))
-import           Data.Proxy   (Proxy (Proxy))
-import           Data.Text    (Text)
-import qualified Data.Text    as Text (pack, unpack)
-import           GHC.Generics ((:*:) ((:*:)), C1, D1, Generic, K1 (K1), M1 (M1),
-                               Meta (MetaCons, MetaSel, MetaData), Rec0, Rep, S1, U1 (U1),
-                               from, to, Par1(Par1))
-import           GHC.TypeLits (KnownSymbol, symbolVal)
-import           Text.Read    (Read)
-import qualified Text.Read    as Read (readMaybe)
-import qualified Text.XML     as XML (Element (Element), Name (Name),
-                                      Node (NodeContent, NodeElement),
-                                      elementName, elementNodes,
-                                      elementAttributes)
+import           Data.Map            (Map)
+import qualified Data.Map            as Map (lookup, singleton, union)
+import           Data.Maybe          (fromMaybe)
+import           Data.Monoid         ((<>))
+import           Data.Proxy          (Proxy (Proxy))
+import           Data.Text           (Text)
+import qualified Data.Text           as Text (pack, unpack)
+import           GHC.Generics        ((:*:) ((:*:)), (:+:) (L1, R1), C1, D1,
+                                      Generic, K1 (K1), M1 (M1),
+                                      Meta (MetaCons, MetaData, MetaSel), Rec0,
+                                      Rep, S1, U1 (U1), from, to)
+import           GHC.TypeLits        (KnownSymbol, symbolVal)
+import           Text.Read           (Read)
+import qualified Text.Read           as Read (readMaybe)
+import qualified Text.XML            as XML (Element (Element), Name (Name),
+                                             Node (NodeContent, NodeElement))
 
 -------------------------------------------------------------------------------
 
@@ -83,7 +87,7 @@ class ToText a where
 
 class FromText a where
     fromText :: Text -> Maybe a
-    
+
 class ToNode a where
     toNode :: a -> [XML.Node]
 
@@ -92,8 +96,17 @@ class FromNode a where
 
 -------------------------------------------------------------------------------
 
+showText :: (Show a) => a -> Text
+showText = Text.pack . show
+
+readMaybeText :: (Read a) => Text -> Maybe a
+readMaybeText = Read.readMaybe . Text.unpack
+
 instance ToText Text where toText = id
 instance FromText Text where fromText = Just . id
+
+instance ToText Int where toText = showText
+instance FromText Int where fromText = readMaybeText
 
 -------------------------------------------------------------------------------
 
@@ -187,7 +200,7 @@ instance FromAttrValue a => FromAttrValue (Maybe a) where
 fromTextFromNode :: (FromText a) => [XML.Node] -> (Result a, [XML.Node])
 fromTextFromNode ns = case ns of
     (XML.NodeContent t) : ns' -> case fromText t of
-        Just x -> (Success x, ns')
+        Just x  -> (Success x, ns')
         Nothing -> (Failure $ FailureParseContent t, ns)
     _ -> (Failure $ FailureMissingNode NodeTypeContent, ns)
 
@@ -206,7 +219,7 @@ optionalNonFailure f = case f of
     FailureMissingNode _       -> True
     FailureExpectedElement _ _ -> True
     _                          -> False
-    
+
 instance FromNode a => FromNode (Maybe a) where
     fromNode nodes = case nodes of
         [] -> (Success Nothing, [])
@@ -230,7 +243,7 @@ instance FromNode a => FromNode [a] where
                     -> (Success xs, ns')
                 (Failure f, ns')
                     -> (Failure f, ns')
-    
+
 -------------------------------------------------------------------------------
 
 data PartialElement
@@ -306,9 +319,11 @@ takeNodes pe = rvalue
 
 -------------------------------------------------------------------------------
 
--- General functions:
 symbolName :: (KnownSymbol s) => Proxy s -> XML.Name
-symbolName p = XML.Name (Text.pack $ symbolVal p) Nothing Nothing
+symbolName p = XML.Name (symbolText p) Nothing Nothing
+
+symbolText :: (KnownSymbol s) => Proxy s -> Text
+symbolText = Text.pack . symbolVal
 
 -------------------------------------------------------------------------------
 
@@ -322,7 +337,7 @@ instance ( KnownSymbol name
          , GToElement c
          ) => GToElement (D1 ('MetaData name x y z) c) where
     gToElement (M1 c)
-        = (gToElement c) . (partialElementName (Proxy @name))
+        = (gToElement c) . (partialElementName (Proxy :: Proxy name))
 
 instance GToElement s => GToElement (C1 ('MetaCons name q w) s) where
     gToElement (M1 sel)
@@ -334,7 +349,7 @@ instance {-# OVERLAPS #-}
          ) => GToElement (S1 ('MetaSel ('Just name) q w e)
                              (Rec0 (Attr a))) where
     gToElement (M1 (K1 (Attr x)))
-        = addAttribute (Proxy @name) x
+        = addAttribute (Proxy :: Proxy name) x
 
 instance ToNode a
          => GToElement (S1 ('MetaSel ('Just name) q w e) (Rec0 a)) where
@@ -360,7 +375,7 @@ k1fst (x, y) = (K1 x, y)
 
 attrfst :: (a, e) -> (Attr a, e)
 attrfst (x, y) = (Attr x, y)
-    
+
 class GFromElement a where
     gFromElement :: PartialElement -> Result (a x, PartialElement)
 
@@ -368,7 +383,7 @@ instance ( KnownSymbol name
          , GFromElement c
          ) => GFromElement (D1 ('MetaData name x y z) c) where
     gFromElement = fmap m1fst
-                 . whenElement (symbolName (Proxy @name)) gFromElement
+                 . whenElement (symbolName (Proxy :: Proxy name)) gFromElement
 
 instance GFromElement s
          => GFromElement (C1 ('MetaCons name q w) s) where
@@ -380,7 +395,7 @@ instance {-# OVERLAPS #-}
          ) => GFromElement (S1 ('MetaSel ('Just name) q w e)
                                (Rec0 (Attr a))) where
     gFromElement = fmap (m1fst . k1fst . attrfst)
-                 . takeAttribute (symbolName (Proxy @name))
+                 . takeAttribute (symbolName (Proxy :: Proxy name))
 
 instance FromNode a
          => GFromElement (S1 ('MetaSel ('Just name) q w e) (Rec0 a)) where
@@ -393,59 +408,67 @@ instance ( GFromElement a
         (l, e')  <- gFromElement e
         (r, e'') <- gFromElement e'
         Success (l :*: r, e'')
-    
+
 -------------------------------------------------------------------------------
 
--- Testing:
+genericSumTypeToElement :: ( Generic a
+                           , GSumTypeToElement (Rep a) )
+                        => a
+                        -> XML.Element
+genericSumTypeToElement x = freeze
+                          $ gsumTypeToElement (from x) emptyPartialElement
 
-data X = X { xa :: Attr Text } deriving (Eq, Show, Generic)
-instance ToElement X
-instance FromElement X
-x = X (Attr "Hello World")
-xe = toElement x
-x' = (fromElement xe) :: Result X
+class GSumTypeToElement a where
+    gsumTypeToElement :: a r -> (PartialElement -> PartialElement)
 
-data Y = Y { ya :: Attr (Maybe Text) } deriving (Eq, Show, Generic)
-instance ToElement Y
-instance FromElement Y
-y1 = Y (Attr (Just "Present"))
-y2 = Y (Attr Nothing)
-y1e = toElement y1
-y2e = toElement y2
-y1' = fromElement y1e :: Result Y
-y2' = fromElement y2e :: Result Y
+instance ( KnownSymbol name
+         , GSumTypeToElement c
+         ) => GSumTypeToElement (D1 ('MetaData name x y z) c) where
+    gsumTypeToElement (M1 c) = (gsumTypeToElement c)
+                             . (partialElementName (Proxy :: Proxy name))
 
-data Z = Z
-    { za :: Attr Text
-    , zy :: Maybe Y
-    } deriving (Eq, Show, Generic)
-instance ToElement Z
-instance FromElement Z
-z1 = Z (Attr "z1 attribute") (Just y1)
-z2 = Z (Attr "z2 attribute") Nothing
-z1e = toElement z1
-z2e = toElement z2
-z1' = fromElement z1e :: Result Z
-z2' = fromElement z2e :: Result Z
+instance ( KnownSymbol name
+         ) => GSumTypeToElement (C1 ('MetaCons name x y) U1) where
+    gsumTypeToElement _ = addNodes (symbolText (Proxy :: Proxy name))
 
-data Q1 = Q1
-    { q1ys :: [Y]
-    } deriving (Eq, Show, Generic)
-instance ToElement Q1
-instance FromElement Q1
-q1a = Q1 [y1, y2]
-q1b = Q1 []
-q1ae = toElement q1a
-q1be = toElement q1b
-q1a' = fromElement q1ae :: Result Q1
-q1b' = fromElement q1be :: Result Q1
+instance ( GSumTypeToElement a
+         , GSumTypeToElement b
+         ) => GSumTypeToElement (a :+: b) where
+    gsumTypeToElement (L1 x) = gsumTypeToElement x
+    gsumTypeToElement (R1 x) = gsumTypeToElement x
 
-data Q2 = Q2
-    { q2txt :: Text
-    } deriving (Eq, Show, Generic)
-instance ToElement Q2
-instance FromElement Q2
-q2 = Q2 "Hello"
-q2e = toElement q2
-q2' = fromElement q2e :: Result Q2
+-------------------------------------------------------------------------------
 
+genericSumTypeFromElement :: ( Generic a
+                             , GSumTypeFromElement (Rep a) )
+                          => XML.Element
+                          -> Result a
+genericSumTypeFromElement e = (to . fst) <$> gsumTypeFromElement (toPartial e)
+
+class GSumTypeFromElement a where
+    gsumTypeFromElement :: PartialElement -> Result (a x, PartialElement)
+
+instance ( KnownSymbol name
+         , GSumTypeFromElement c
+         ) => GSumTypeFromElement (D1 ('MetaData name x y z) c) where
+    gsumTypeFromElement = fmap m1fst
+                        . whenElement eName gsumTypeFromElement
+      where
+        eName = symbolName (Proxy :: Proxy name)
+
+instance ( KnownSymbol name
+         ) => GSumTypeFromElement (C1 ('MetaCons name x y) U1) where
+    gsumTypeFromElement pe
+        = takeNodes pe
+      >>= \(t, _) -> if t == eName
+                     then Success (M1 U1, pe)
+                     else Failure $ FailureParseContent t
+      where
+        eName = symbolText (Proxy :: Proxy name)
+
+instance ( GSumTypeFromElement a
+         , GSumTypeFromElement b
+         ) => GSumTypeFromElement (a :+: b) where
+    gsumTypeFromElement pe = case gsumTypeFromElement pe of
+        Success (l, pe') -> Success (L1 l, pe')
+        _ -> gsumTypeFromElement pe >>= \(r, pe') -> Success (R1 r, pe')
