@@ -12,8 +12,37 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE TypeApplications     #-}
 
--- TODO Proper export
-module Network.InnerChange.XML.Types where
+module Network.InnerChange.XML.Types
+    ( -- * Classes
+      ToElement (toElement)
+    , FromElement (fromElement)
+    , ToText (toText)
+    , FromText (fromText)
+    , ToNode (toNode)
+    , FromNode (fromNode)
+      -- * Types
+    , Result (Success, Failure)
+    , FailureDetails
+        ( FailureExpectedElement
+        , FailureParseAttribute
+        , FailureMissingNode
+        , FailureParseContent
+        , feeExpected
+        , feeActual
+        , fpaAttribute
+        , fpaValue
+        , fmnExpected
+        , fpcText )
+    , ElementName (ElementName)
+    , AttributeName (AttributeName)
+    , NodeType (NodeTypeElement, NodeTypeContent)
+      -- * Generics
+    , genericToElement
+    , genericFromElement
+      -- * Helpers
+    , toTextToNode
+    , fromTextFromNode
+    ) where
 
 import           Data.Map     (Map)
 import qualified Data.Map     as Map (singleton, union, lookup)
@@ -55,6 +84,12 @@ class ToText a where
 class FromText a where
     fromText :: Text -> Maybe a
     
+class ToNode a where
+    toNode :: a -> [XML.Node]
+
+class FromNode a where
+    fromNode :: [XML.Node] -> (Result a, [XML.Node])
+
 -------------------------------------------------------------------------------
 
 instance ToText Text where toText = id
@@ -109,12 +144,6 @@ data NodeType
     deriving (Eq, Show)
 
 -------------------------------------------------------------------------------
-
-class ToNode a where
-    toNode :: a -> [XML.Node]
-
-class FromNode a where
-    fromNode :: [XML.Node] -> (Result a, [XML.Node])
 
 class ToAttrValue a where
     toAttrValue :: a -> Maybe Text
@@ -278,10 +307,9 @@ takeNodes pe = rvalue
 -------------------------------------------------------------------------------
 
 -- General functions:
-
 symbolName :: (KnownSymbol s) => Proxy s -> XML.Name
 symbolName p = XML.Name (Text.pack $ symbolVal p) Nothing Nothing
-    
+
 -------------------------------------------------------------------------------
 
 genericToElement :: (Generic a, GToElement (Rep a)) => a -> XML.Element
@@ -303,7 +331,8 @@ instance GToElement s => GToElement (C1 ('MetaCons name q w) s) where
 instance {-# OVERLAPS #-}
          ( KnownSymbol name
          , ToAttrValue a
-         ) => GToElement (S1 ('MetaSel ('Just name) q w e) (Rec0 (Attr a))) where
+         ) => GToElement (S1 ('MetaSel ('Just name) q w e)
+                             (Rec0 (Attr a))) where
     gToElement (M1 (K1 (Attr x)))
         = addAttribute (Proxy @name) x
 
