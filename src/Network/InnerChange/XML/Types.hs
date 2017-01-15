@@ -42,12 +42,16 @@ class ToElement a where
 
 class FromElement a where
     fromElement :: XML.Element -> Result a
+    default fromElement :: (Generic a, GFromElement (Rep a))
+                        => XML.Element
+                        -> Result a
+    fromElement e = (to . fst) <$> gFromElement (toPartial e)
 
 class ToText a where
     toText :: a -> Text
 
 class FromText a where
-    fromText :: a -> Maybe Text
+    fromText :: Text -> Maybe a
     
 -------------------------------------------------------------------------------
 
@@ -76,22 +80,16 @@ instance Monad Result where
     Success x >>= f = f x
 
 data FailureDetails
-    = FailureOther Text
-    | FailureNodeType NodeType
-    | FailureContent ElementName
-    | FailureElementName
-    { fenActual   :: ElementName
-    , fenExpected :: ElementName }
-    | FailureMissingChild
-    { fmcParent :: ElementName
-    , fmcChild  :: ElementName }
-    | FailureMissingAttribute ElementName AttributeName
-    | FailureParseAttribute ElementName AttributeName Text
-    | FailureNonUniqueElement
-    { fnuParent :: ElementName
-    , fnuChild  :: ElementName }
-    | FailureMissingContent ElementName
-    | FailureParseContent ElementName Text
+    = FailureExpectedElement
+    { feeExpected :: ElementName
+    , feeActual   :: ElementName }
+    | FailureParseAttribute
+    { fpaAttribute :: AttributeName
+    , fpaValue     :: Maybe Text }
+    | FailureMissingNode
+    { fmnExpected :: NodeType }
+    | FailureParseContent
+    { fpcText :: Text }
     deriving (Eq, Show)
 
 newtype ElementName = ElementName XML.Name
@@ -99,6 +97,9 @@ newtype ElementName = ElementName XML.Name
 
 newtype AttributeName = AttributeName XML.Name
                       deriving (Eq, Show)
+
+maybeFail :: FailureDetails -> Maybe a -> Result a
+maybeFail fd = maybe (Failure fd) Success
 
 data NodeType
     = NodeTypeElement
@@ -117,15 +118,18 @@ class ToAttrValue a where
     toAttrValue :: a -> Maybe Text
 
 class FromAttrValue a where
-    fromAttrValue :: Text -> Maybe a
+    fromAttrValue :: Maybe Text -> Maybe a
 
 -------------------------------------------------------------------------------
 
 instance ToElement a => ToNode a where
     toNode = (:[]) . XML.NodeElement . toElement
 
-instance ToNode Text where
-    toNode = (:[]) . XML.NodeContent
+toTextToNode :: (ToText a) => a -> [XML.Node]
+toTextToNode = (:[]) . XML.NodeContent . toText
+
+instance {-# OVERLAPS #-} ToNode Text where
+    toNode = toTextToNode
 
 instance {-# OVERLAPS #-} ToElement a => ToNode (Maybe a) where
     toNode mba = case mba of
@@ -135,17 +139,67 @@ instance {-# OVERLAPS #-} ToElement a => ToNode (Maybe a) where
 instance {-# OVERLAPS #-} ToElement a => ToNode [a] where
     toNode = fmap (XML.NodeElement . toElement) . reverse
 
--------------------------------------------------------------------------------
-
 instance {-# OVERLAPS #-} ToText a => ToAttrValue a where
     toAttrValue = Just . toText
 
 instance {-# OVERLAPS #-} ToAttrValue a => ToAttrValue (Maybe a) where
     toAttrValue = (=<<) toAttrValue
 
-instance ToAttrValue a => ToAttrValue [a] where
-    toAttrValue = error "ToAttrValue[a] not yet implemented" -- TODO
+instance {-# OVERLAPS #-} FromText a => FromAttrValue a where
+    fromAttrValue = (=<<) fromText
 
+instance FromAttrValue a => FromAttrValue (Maybe a) where
+    fromAttrValue mbt = case mbt of
+        Nothing -> Just Nothing
+        Just t  -> Just <$> fromAttrValue (Just t)
+
+fromTextFromNode :: (FromText a) => [XML.Node] -> (Result a, [XML.Node])
+fromTextFromNode ns = case ns of
+    (XML.NodeContent t) : ns' -> case fromText t of
+        Just x -> (Success x, ns')
+        Nothing -> (Failure $ FailureParseContent t, ns)
+    _ -> (Failure $ FailureMissingNode NodeTypeContent, ns)
+
+instance FromNode Text where
+    fromNode = fromTextFromNode
+
+instance {-# OVERLAPS #-} FromElement a => FromNode a where
+    fromNode ns = case ns of
+        (XML.NodeElement e) : ns' -> case fromElement e of
+            Success v -> (Success v, ns')
+            Failure f -> (Failure f, ns)
+        _ -> (Failure $ FailureMissingNode NodeTypeElement, ns)
+
+optionalNonFailure :: FailureDetails -> Bool
+optionalNonFailure f = case f of
+    FailureMissingNode _       -> True
+    FailureExpectedElement _ _ -> True
+    _                          -> False
+    
+instance FromNode a => FromNode (Maybe a) where
+    fromNode nodes = case nodes of
+        [] -> (Success Nothing, [])
+        ns -> case fromNode ns of
+                  (Success v, ns')
+                      -> (Success $ Just v, ns')
+                  (Failure f, ns') | optionalNonFailure f
+                      -> (Success Nothing, ns')
+                  (Failure f, ns')
+                      -> (Failure f, ns')
+
+instance FromNode a => FromNode [a] where
+    fromNode nodes' = accum [] nodes'
+      where
+        accum xs nodes = case nodes of
+            [] -> (Success (reverse xs), [])
+            ns -> case fromNode ns of
+                (Success x, ns')
+                    -> accum (x:xs) ns'
+                (Failure f, ns') | optionalNonFailure f
+                    -> (Success xs, ns')
+                (Failure f, ns')
+                    -> (Failure f, ns')
+    
 -------------------------------------------------------------------------------
 
 data PartialElement
@@ -178,11 +232,46 @@ addNodes x initPe = case toNode x of
     [n] -> initPe { peNodes = n : (peNodes initPe) }
     ns  -> initPe { peNodes = ns <> (peNodes initPe) }
 
--- TODO: may need to reverse nodes?
 freeze :: PartialElement -> XML.Element
-freeze pe = XML.Element name (peAttrs pe) (peNodes pe)
+freeze pe = XML.Element name (peAttrs pe) ((reverse . peNodes) pe)
   where
     name = fromMaybe (XML.Name "" Nothing Nothing) (peName pe)
+
+toPartial :: XML.Element -> PartialElement
+toPartial (XML.Element name as ns) = PartialElement (Just name) as ns
+
+peJustName :: PartialElement -> XML.Name
+peJustName pe = fromMaybe emptyName (peName pe)
+  where
+    emptyName = XML.Name "" Nothing Nothing
+
+whenElement :: XML.Name
+            -> (PartialElement -> Result (a x, PartialElement))
+            -> PartialElement
+            -> Result (a x, PartialElement)
+whenElement name f pe = if (eName == name) then f pe else failure
+  where
+    eName = peJustName pe
+    failure = Failure
+            $ FailureExpectedElement (ElementName name) (ElementName eName)
+
+takeAttribute :: FromAttrValue a
+              => XML.Name
+              -> PartialElement
+              -> Result (a, PartialElement)
+takeAttribute name pe = maybeFail failureParse (fromAttrValue mbvalue)
+                    >>= \x -> Success (x, pe)
+  where
+    mbvalue = Map.lookup name (peAttrs pe)
+    failureParse = FailureParseAttribute (AttributeName name) mbvalue
+
+takeNodes :: FromNode a
+          => PartialElement
+          -> Result (a, PartialElement)
+takeNodes pe = rvalue
+           >>= \value -> Success (value, pe { peNodes = nodes' })
+  where
+    (rvalue, nodes') = fromNode (peNodes pe)
 
 -------------------------------------------------------------------------------
 
@@ -224,35 +313,100 @@ instance ( GToElement a
 
 -------------------------------------------------------------------------------
 
+m1fst :: (f p, e) -> (M1 i c f p, e)
+m1fst (x, y) = (M1 x, y)
+
+k1fst :: (c, e) -> (K1 i c p, e)
+k1fst (x, y) = (K1 x, y)
+
+attrfst :: (a, e) -> (Attr a, e)
+attrfst (x, y) = (Attr x, y)
+    
+class GFromElement a where
+    gFromElement :: PartialElement -> Result (a x, PartialElement)
+
+instance ( KnownSymbol name
+         , GFromElement c
+         ) => GFromElement (D1 ('MetaData name x y z) c) where
+    gFromElement = fmap m1fst
+                 . whenElement (symbolName (Proxy @name)) gFromElement
+
+instance GFromElement s
+         => GFromElement (C1 ('MetaCons name q w) s) where
+    gFromElement = fmap m1fst . gFromElement
+
+instance {-# OVERLAPS #-}
+         ( KnownSymbol name
+         , FromAttrValue a
+         ) => GFromElement (S1 ('MetaSel ('Just name) q w e)
+                               (Rec0 (Attr a))) where
+    gFromElement = fmap (m1fst . k1fst . attrfst)
+                 . takeAttribute (symbolName (Proxy @name))
+
+instance FromNode a
+         => GFromElement (S1 ('MetaSel ('Just name) q w e) (Rec0 a)) where
+    gFromElement = fmap (m1fst . k1fst) . takeNodes
+
+instance ( GFromElement a
+         , GFromElement b
+         ) => GFromElement (a :*: b) where
+    gFromElement e = do
+        (l, e')  <- gFromElement e
+        (r, e'') <- gFromElement e'
+        Success (l :*: r, e'')
+    
+-------------------------------------------------------------------------------
+
 -- Testing:
 
 data X = X { xa :: Attr Text } deriving (Eq, Show, Generic)
 instance ToElement X
+instance FromElement X
 x = X (Attr "Hello World")
 xe = toElement x
+x' = (fromElement xe) :: Result X
 
 data Y = Y { ya :: Attr (Maybe Text) } deriving (Eq, Show, Generic)
 instance ToElement Y
+instance FromElement Y
 y1 = Y (Attr (Just "Present"))
 y2 = Y (Attr Nothing)
 y1e = toElement y1
 y2e = toElement y2
+y1' = fromElement y1e :: Result Y
+y2' = fromElement y2e :: Result Y
 
 data Z = Z
     { za :: Attr Text
     , zy :: Maybe Y
     } deriving (Eq, Show, Generic)
 instance ToElement Z
+instance FromElement Z
 z1 = Z (Attr "z1 attribute") (Just y1)
 z2 = Z (Attr "z2 attribute") Nothing
 z1e = toElement z1
 z2e = toElement z2
+z1' = fromElement z1e :: Result Z
+z2' = fromElement z2e :: Result Z
 
 data Q1 = Q1
     { q1ys :: [Y]
     } deriving (Eq, Show, Generic)
 instance ToElement Q1
+instance FromElement Q1
 q1a = Q1 [y1, y2]
 q1b = Q1 []
 q1ae = toElement q1a
 q1be = toElement q1b
+q1a' = fromElement q1ae :: Result Q1
+q1b' = fromElement q1be :: Result Q1
+
+data Q2 = Q2
+    { q2txt :: Text
+    } deriving (Eq, Show, Generic)
+instance ToElement Q2
+instance FromElement Q2
+q2 = Q2 "Hello"
+q2e = toElement q2
+q2' = fromElement q2e :: Result Q2
+
