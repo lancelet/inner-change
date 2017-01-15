@@ -37,15 +37,17 @@ import qualified Text.XML     as XML (Element (Element), Name (Name),
 
 class ToElement a where
     toElement :: a -> XML.Element
+
     default toElement :: (Generic a, GToElement (Rep a)) => a -> XML.Element
-    toElement a = freeze $ gToElement (from a) emptyPartialElement
+    toElement = genericToElement
 
 class FromElement a where
     fromElement :: XML.Element -> Result a
+
     default fromElement :: (Generic a, GFromElement (Rep a))
                         => XML.Element
                         -> Result a
-    fromElement e = (to . fst) <$> gFromElement (toPartial e)
+    fromElement = genericFromElement
 
 class ToText a where
     toText :: a -> Text
@@ -282,6 +284,9 @@ symbolName p = XML.Name (Text.pack $ symbolVal p) Nothing Nothing
     
 -------------------------------------------------------------------------------
 
+genericToElement :: (Generic a, GToElement (Rep a)) => a -> XML.Element
+genericToElement x = freeze $ gToElement (from x) emptyPartialElement
+
 class GToElement a where
     gToElement :: a x -> (PartialElement -> PartialElement)
 
@@ -312,6 +317,11 @@ instance ( GToElement a
     gToElement (a :*: b) = (gToElement b) . (gToElement a)
 
 -------------------------------------------------------------------------------
+
+genericFromElement :: (Generic a, GFromElement (Rep a))
+                   => XML.Element
+                   -> Result a
+genericFromElement e = (to . fst) <$> gFromElement (toPartial e)
 
 m1fst :: (f p, e) -> (M1 i c f p, e)
 m1fst (x, y) = (M1 x, y)
