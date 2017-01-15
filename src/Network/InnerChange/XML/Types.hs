@@ -21,7 +21,7 @@ module Network.InnerChange.XML.Types
     , ToNode (toNode)
     , FromNode (fromNode)
       -- * Types
-    , Attr (unAttr)
+    , Attr (Attr, unAttr)
     , Result (Success, Failure)
     , FailureDetails
         ( FailureExpectedElement
