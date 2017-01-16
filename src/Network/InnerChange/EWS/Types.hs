@@ -2,12 +2,14 @@
 {-# LANGUAGE DeriveGeneric              #-}
 {-# LANGUAGE DuplicateRecordFields      #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE OverloadedStrings          #-}
-{-# LANGUAGE TypeFamilies               #-}
 {-# LANGUAGE MultiParamTypeClasses      #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE TemplateHaskell            #-}
+{-# LANGUAGE TypeFamilies               #-}
 
 module Network.InnerChange.EWS.Types where
 
+import           Network.InnerChange.XML.TH
 import           Network.InnerChange.XML.Types
 
 import qualified Data.Char                     as Char (toUpper)
@@ -50,7 +52,6 @@ instance ToText FieldURIFolderProperty where
 
 instance FromText FieldURIFolderProperty where
     fromText = genericSumTypeFromText fieldUriFolderPropertyOpts
-
 
 -------------------------------------------------------------------------------
 
@@ -128,13 +129,6 @@ data ParentFolderId = ParentFolderId Id (Maybe ChangeKey)
 
 -------------------------------------------------------------------------------
 
-instance Encode AdditionalProperties where
-    type EncodeFor AdditionalProperties = SoapAdditionalProperties
-instance ToElement AdditionalProperties where
-    toElement = toElement . encode
-instance FromElement AdditionalProperties where
-    fromElement = fmap decode . fromElement
-
 instance ToElement BaseShape where
     toElement = genericSumTypeToElement sencopt
 instance FromElement BaseShape where
@@ -152,24 +146,10 @@ instance FromAttrValue DistinguishedFolder where
 distinguishedFolderOpts :: OptionsText
 distinguishedFolderOpts = OptionsText $ Prelude.id
 
-instance Encode DistinguishedFolderId where
-    type EncodeFor DistinguishedFolderId = SoapDistinguishedFolderId
-instance ToElement DistinguishedFolderId where
-    toElement = toElement . encode
-instance FromElement DistinguishedFolderId where
-    fromElement = fmap decode . fromElement
-
-instance Encode EmailAddress where
-    type EncodeFor EmailAddress = SoapEmailAddress
-instance ToElement EmailAddress where
-    toElement = toElement . encode
-instance FromElement EmailAddress where
-    fromElement = fmap decode . fromElement
-    
 instance ToAttrValue FieldURI where
     toAttrValue (FieldURIFolder p) = Just $ toText p
 instance FromAttrValue FieldURI where
-    fromAttrValue Nothing = Nothing
+    fromAttrValue Nothing     = Nothing
     fromAttrValue (Just text) = FieldURIFolder <$> fromText text
 instance ToElement FieldURI where
     toElement f = toElement $ SoapFieldURI (Attr f)
@@ -177,176 +157,12 @@ instance FromElement FieldURI where
     fromElement e = (\(SoapFieldURI (Attr f)) -> f)
                 <$> fromElement e
 
-instance Encode FolderId where
-    type EncodeFor FolderId = SoapFolderId
-instance ToElement FolderId where
-    toElement = toElement . encode
-instance FromElement FolderId where
-    fromElement = fmap decode . fromElement
-    
-instance Encode FolderShape where
-    type EncodeFor FolderShape = SoapFolderShape
-instance ToElement FolderShape where
-    toElement = toElement . encode
-instance FromElement FolderShape where
-    fromElement = fmap decode . fromElement
-
-instance Encode ItemId where
-    type EncodeFor ItemId = SoapItemId
-instance ToElement ItemId where
-    toElement = toElement . encode
-instance FromElement ItemId where
-    fromElement = fmap decode . fromElement
-
-instance Encode Mailbox where
-    type EncodeFor Mailbox = SoapMailbox
-instance ToElement Mailbox where
-    toElement = toElement . encode
-instance FromElement Mailbox where
-    fromElement = fmap decode . fromElement
-
 instance ToElement MailboxType where
     toElement = genericSumTypeToElement mbEncopt
 instance FromElement MailboxType where
     fromElement = genericSumTypeFromElement mbEncopt
 mbEncopt :: Options
 mbEncopt = Options (toNameSimple . (Text.drop 1)) toAttrName toCst
-
-instance Encode Name where
-    type EncodeFor Name = SoapName
-instance ToElement Name where
-    toElement = toElement . encode
-instance FromElement Name where
-    fromElement = fmap decode . fromElement
-
-
-instance Encode ParentFolderId where
-    type EncodeFor ParentFolderId = SoapParentFolderId
-instance ToElement ParentFolderId where
-    toElement = toElement . encode
-instance FromElement ParentFolderId where
-    fromElement = fmap decode . fromElement
-
--------------------------------------------------------------------------------
-
-data SoapAdditionalProperties = SoapAdditionalProperties
-    { fieldURIs :: [FieldURI]
-    } deriving (Eq, Show, Generic)
-
-instance ToElement SoapAdditionalProperties where
-    toElement = genericToElement encopt
-
-instance FromElement SoapAdditionalProperties where
-    fromElement = genericFromElement encopt
-
-
-data SoapDistinguishedFolderId = SoapDistinguishedFolderId
-    { id        :: Attr DistinguishedFolder
-    , changeKey :: Attr (Maybe ChangeKey)
-    , mailbox   :: Mailbox
-    } deriving (Eq, Show, Generic)
-
-instance ToElement SoapDistinguishedFolderId where
-    toElement = genericToElement encopt
-    
-instance FromElement SoapDistinguishedFolderId where
-    fromElement = genericFromElement encopt
-
-
-data SoapEmailAddress = SoapEmailAddress
-    { emailAddress :: Text
-    } deriving (Eq, Show, Generic)
-
-instance ToElement SoapEmailAddress where
-    toElement = genericToElement encopt
-
-instance FromElement SoapEmailAddress where
-    fromElement = genericFromElement encopt
-
-
-data SoapFieldURI = SoapFieldURI
-    { fieldURI :: Attr FieldURI
-    } deriving (Eq, Show, Generic)
-
-instance ToElement SoapFieldURI where
-    toElement = genericToElement encopt
-
-instance FromElement SoapFieldURI where
-    fromElement = genericFromElement encopt
-
-
-data SoapFolderId = SoapFolderId
-    { id        :: Attr Id
-    , changeKey :: Attr (Maybe ChangeKey)
-    } deriving (Eq, Show, Generic)
-
-instance ToElement SoapFolderId where
-    toElement = genericToElement encopt
-
-instance FromElement SoapFolderId where
-    fromElement = genericFromElement encopt
-
-
-data SoapFolderShape = SoapFolderShape
-    { baseShape       :: BaseShape
-    , additionalProps :: Maybe AdditionalProperties
-    } deriving (Eq, Show, Generic)
-
-instance ToElement SoapFolderShape where
-    toElement = genericToElement encopt
-
-instance FromElement SoapFolderShape where
-    fromElement = genericFromElement encopt
-
-
-data SoapItemId = SoapItemId
-    { id        :: Attr Id
-    , changeKey :: Attr (Maybe ChangeKey)
-    } deriving (Eq, Show, Generic)
-
-instance ToElement SoapItemId where
-    toElement = genericToElement encopt
-
-instance FromElement SoapItemId where
-    fromElement = genericFromElement encopt
-
-
-data SoapMailbox = SoapMailbox
-    { smName         :: Maybe Name
-    , smEmailAddress :: Maybe EmailAddress
-    , smType         :: Maybe MailboxType
-    , smItemId       :: Maybe ItemId
-    } deriving (Eq, Show, Generic)
-
-instance ToElement SoapMailbox where
-    toElement = genericToElement encopt
-
-instance FromElement SoapMailbox where
-    fromElement = genericFromElement encopt
-
-
-data SoapName = SoapName
-    { name :: Text }
-    deriving (Eq, Show, Generic)
-
-instance ToElement SoapName where
-    toElement = genericToElement encopt
-
-instance FromElement SoapName where
-    fromElement = genericFromElement encopt
-
-
-data SoapParentFolderId = SoapParentFolderId
-    { id        :: Attr Id
-    , changeKey :: Attr (Maybe ChangeKey)
-    } deriving (Eq, Show, Generic)
-
-instance ToElement SoapParentFolderId where
-    toElement = genericToElement encopt
-
-instance FromElement SoapParentFolderId where
-    fromElement = genericFromElement encopt
-
 
 -------------------------------------------------------------------------------
 
@@ -366,6 +182,82 @@ toAttrName = toNameSimple . capitalizeFirst
 
 toCst :: Text -> Text
 toCst = Prelude.id
+
+-------------------------------------------------------------------------------
+
+data SoapAdditionalProperties = SoapAdditionalProperties
+    { fieldURIs :: [FieldURI]
+    } deriving (Eq, Show, Generic)
+
+data SoapDistinguishedFolderId = SoapDistinguishedFolderId
+    { id        :: Attr DistinguishedFolder
+    , changeKey :: Attr (Maybe ChangeKey)
+    , mailbox   :: Mailbox
+    } deriving (Eq, Show, Generic)
+
+data SoapEmailAddress = SoapEmailAddress
+    { emailAddress :: Text
+    } deriving (Eq, Show, Generic)
+
+data SoapFieldURI = SoapFieldURI
+    { fieldURI :: Attr FieldURI
+    } deriving (Eq, Show, Generic)
+
+data SoapFolderId = SoapFolderId
+    { id        :: Attr Id
+    , changeKey :: Attr (Maybe ChangeKey)
+    } deriving (Eq, Show, Generic)
+
+data SoapFolderShape = SoapFolderShape
+    { baseShape       :: BaseShape
+    , additionalProps :: Maybe AdditionalProperties
+    } deriving (Eq, Show, Generic)
+
+data SoapItemId = SoapItemId
+    { id        :: Attr Id
+    , changeKey :: Attr (Maybe ChangeKey)
+    } deriving (Eq, Show, Generic)
+
+data SoapMailbox = SoapMailbox
+    { smName         :: Maybe Name
+    , smEmailAddress :: Maybe EmailAddress
+    , smType         :: Maybe MailboxType
+    , smItemId       :: Maybe ItemId
+    } deriving (Eq, Show, Generic)
+
+data SoapName = SoapName
+    { name :: Text }
+    deriving (Eq, Show, Generic)
+
+data SoapParentFolderId = SoapParentFolderId
+    { id        :: Attr Id
+    , changeKey :: Attr (Maybe ChangeKey)
+    } deriving (Eq, Show, Generic)
+
+-------------------------------------------------------------------------------
+
+$(deriveToFromSoapElement ''SoapAdditionalProperties)
+$(deriveToFromSoapElement ''SoapDistinguishedFolderId)
+$(deriveToFromSoapElement ''SoapEmailAddress)
+$(deriveToFromSoapElement ''SoapFieldURI)
+$(deriveToFromSoapElement ''SoapFolderId)
+$(deriveToFromSoapElement ''SoapFolderShape)
+$(deriveToFromSoapElement ''SoapItemId)
+$(deriveToFromSoapElement ''SoapMailbox)
+$(deriveToFromSoapElement ''SoapName)
+$(deriveToFromSoapElement ''SoapParentFolderId)
+
+-------------------------------------------------------------------------------
+
+$(encodeElement ''AdditionalProperties  ''SoapAdditionalProperties)
+$(encodeElement ''DistinguishedFolderId ''SoapDistinguishedFolderId)
+$(encodeElement ''EmailAddress          ''SoapEmailAddress)
+$(encodeElement ''FolderId              ''SoapFolderId)
+$(encodeElement ''FolderShape           ''SoapFolderShape)
+$(encodeElement ''ItemId                ''SoapItemId)
+$(encodeElement ''Mailbox               ''SoapMailbox)
+$(encodeElement ''Name                  ''SoapName)
+$(encodeElement ''ParentFolderId        ''SoapParentFolderId)
 
 -------------------------------------------------------------------------------
 
