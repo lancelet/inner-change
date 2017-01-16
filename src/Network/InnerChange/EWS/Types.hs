@@ -1,8 +1,10 @@
--- {-# OPTIONS_GHC -Wwarn #-}
+{-# OPTIONS_GHC -Wwarn #-}
 {-# LANGUAGE DeriveGeneric              #-}
 {-# LANGUAGE DuplicateRecordFields      #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE TypeFamilies               #-}
+{-# LANGUAGE MultiParamTypeClasses      #-}
 
 module Network.InnerChange.EWS.Types where
 
@@ -84,9 +86,11 @@ data FieldURI = FieldURIFolder FieldURIFolderProperty
 
 -- https://msdn.microsoft.com/en-us/library/office/aa579461(v=exchg.150).aspx
 data FolderId = FolderId Id (Maybe ChangeKey)
+              deriving (Eq, Show, Generic)
 
 -- https://msdn.microsoft.com/en-us/library/office/aa580509(v=exchg.150).aspx
 data FolderIds = FolderIds [FolderId] [DistinguishedFolderId]
+               deriving (Eq, Show, Generic)
 
 -- https://msdn.microsoft.com/en-us/library/office/aa494311(v=exchg.150).aspx
 data FolderShape = FolderShape BaseShape (Maybe AdditionalProperties)
@@ -124,133 +128,106 @@ data ParentFolderId = ParentFolderId Id (Maybe ChangeKey)
 
 -------------------------------------------------------------------------------
 
+instance Encode AdditionalProperties where
+    type EncodeFor AdditionalProperties = SoapAdditionalProperties
 instance ToElement AdditionalProperties where
-    toElement (AdditionalProperties fs)
-        = toElement $ SoapAdditionalProperties fs
-
+    toElement = toElement . encode
 instance FromElement AdditionalProperties where
-    fromElement e = (\(SoapAdditionalProperties fs) -> AdditionalProperties fs)
-                <$> fromElement e
-
+    fromElement = fmap decode . fromElement
 
 instance ToElement BaseShape where
     toElement = genericSumTypeToElement sencopt
-
 instance FromElement BaseShape where
     fromElement = genericSumTypeFromElement sencopt
 
-
 instance ToText DistinguishedFolder where
     toText = genericSumTypeToText distinguishedFolderOpts
-
 instance FromText DistinguishedFolder where
     fromText = genericSumTypeFromText distinguishedFolderOpts
 
 instance ToAttrValue DistinguishedFolder where
     toAttrValue = Just . toText
-
 instance FromAttrValue DistinguishedFolder where
     fromAttrValue = (=<<) fromText
-
 distinguishedFolderOpts :: OptionsText
 distinguishedFolderOpts = OptionsText $ Prelude.id
 
-
+instance Encode DistinguishedFolderId where
+    type EncodeFor DistinguishedFolderId = SoapDistinguishedFolderId
 instance ToElement DistinguishedFolderId where
-    toElement (DistinguishedFolderId i c m)
-        = toElement $ SoapDistinguishedFolderId (Attr i) (Attr c) m
-
+    toElement = toElement . encode
 instance FromElement DistinguishedFolderId where
-    fromElement e = (\(SoapDistinguishedFolderId (Attr i) (Attr c) m)
-                        -> DistinguishedFolderId i c m)
-                <$> fromElement e
+    fromElement = fmap decode . fromElement
 
-
+instance Encode EmailAddress where
+    type EncodeFor EmailAddress = SoapEmailAddress
 instance ToElement EmailAddress where
-    toElement (EmailAddress a) = toElement (SoapEmailAddress a)
-
+    toElement = toElement . encode
 instance FromElement EmailAddress where
-    fromElement e = (\(SoapEmailAddress a) -> EmailAddress a)
-                <$> fromElement e
-
-
+    fromElement = fmap decode . fromElement
+    
 instance ToAttrValue FieldURI where
     toAttrValue (FieldURIFolder p) = Just $ toText p
-
 instance FromAttrValue FieldURI where
     fromAttrValue Nothing = Nothing
     fromAttrValue (Just text) = FieldURIFolder <$> fromText text
-
-
 instance ToElement FieldURI where
     toElement f = toElement $ SoapFieldURI (Attr f)
-
 instance FromElement FieldURI where
     fromElement e = (\(SoapFieldURI (Attr f)) -> f)
                 <$> fromElement e
 
-
+instance Encode FolderId where
+    type EncodeFor FolderId = SoapFolderId
 instance ToElement FolderId where
-    toElement (FolderId i c) = toElement $ SoapFolderId (Attr i) (Attr c)
-
+    toElement = toElement . encode
 instance FromElement FolderId where
-    fromElement e = (\(SoapFolderId (Attr i) (Attr c)) -> FolderId i c)
-                <$> fromElement e
-
-
+    fromElement = fmap decode . fromElement
+    
+instance Encode FolderShape where
+    type EncodeFor FolderShape = SoapFolderShape
 instance ToElement FolderShape where
-    toElement (FolderShape b a) = toElement (SoapFolderShape b a)
-
+    toElement = toElement . encode
 instance FromElement FolderShape where
-    fromElement e = (\(SoapFolderShape b a) -> FolderShape b a)
-                <$> fromElement e
+    fromElement = fmap decode . fromElement
 
-
+instance Encode ItemId where
+    type EncodeFor ItemId = SoapItemId
 instance ToElement ItemId where
-    toElement (ItemId i c) = toElement $ SoapItemId (Attr i) (Attr c)
-
+    toElement = toElement . encode
 instance FromElement ItemId where
-    fromElement e = (\(SoapItemId (Attr i) (Attr c)) -> ItemId i c)
-                <$> fromElement e
+    fromElement = fmap decode . fromElement
 
-
+instance Encode Mailbox where
+    type EncodeFor Mailbox = SoapMailbox
 instance ToElement Mailbox where
-    toElement (Mailbox n m t i) = toElement $ SoapMailbox n m t i
-
+    toElement = toElement . encode
 instance FromElement Mailbox where
-    fromElement e = (\(SoapMailbox n m t i) -> Mailbox n m t i)
-                <$> fromElement e
-
+    fromElement = fmap decode . fromElement
 
 instance ToElement MailboxType where
     toElement = genericSumTypeToElement mbEncopt
-
 instance FromElement MailboxType where
     fromElement = genericSumTypeFromElement mbEncopt
-
 mbEncopt :: Options
 mbEncopt = Options (toNameSimple . (Text.drop 1)) toAttrName toCst
 
-
+instance Encode Name where
+    type EncodeFor Name = SoapName
 instance ToElement Name where
-    toElement (Name n) = toElement $ SoapName n
-
+    toElement = toElement . encode
 instance FromElement Name where
-    fromElement e = (\(SoapName n) -> Name n) <$> fromElement e
+    fromElement = fmap decode . fromElement
 
 
+instance Encode ParentFolderId where
+    type EncodeFor ParentFolderId = SoapParentFolderId
 instance ToElement ParentFolderId where
-    toElement (ParentFolderId i c) = toElement
-                                   $ SoapParentFolderId (Attr i) (Attr c)
-
+    toElement = toElement . encode
 instance FromElement ParentFolderId where
-    fromElement e = (\(SoapParentFolderId (Attr i) (Attr c))
-                        -> ParentFolderId i c)
-                <$> fromElement e
-
+    fromElement = fmap decode . fromElement
 
 -------------------------------------------------------------------------------
-
 
 data SoapAdditionalProperties = SoapAdditionalProperties
     { fieldURIs :: [FieldURI]

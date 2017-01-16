@@ -1,16 +1,17 @@
 -- {-# OPTIONS_GHC -Wwarn #-}
-{-# LANGUAGE DataKinds            #-}
-{-# LANGUAGE DefaultSignatures    #-}
-{-# LANGUAGE DeriveFunctor        #-}
-{-# LANGUAGE DeriveGeneric        #-}
-{-# LANGUAGE FlexibleContexts     #-}
-{-# LANGUAGE FlexibleInstances    #-}
-{-# LANGUAGE KindSignatures       #-}
-{-# LANGUAGE OverloadedStrings    #-}
-{-# LANGUAGE ScopedTypeVariables  #-}
-{-# LANGUAGE TypeFamilies         #-}
-{-# LANGUAGE TypeOperators        #-}
-{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE DataKinds             #-}
+{-# LANGUAGE DefaultSignatures     #-}
+{-# LANGUAGE DeriveFunctor         #-}
+{-# LANGUAGE DeriveGeneric         #-}
+{-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE FlexibleInstances     #-}
+{-# LANGUAGE KindSignatures        #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE TypeFamilies          #-}
+{-# LANGUAGE TypeOperators         #-}
+{-# LANGUAGE UndecidableInstances  #-}
 
 module Network.InnerChange.XML.Types
     ( -- * Classes
@@ -22,6 +23,9 @@ module Network.InnerChange.XML.Types
     , FromNode (fromNode)
     , ToAttrValue (toAttrValue)
     , FromAttrValue (fromAttrValue)
+    , Conv (conv)
+    , Encode (encode, decode)
+    , EncodeFor
       -- * Types
     , Attr (Attr, unAttr)
     , Result (Success, Failure)
@@ -46,6 +50,7 @@ module Network.InnerChange.XML.Types
     , genericSumTypeFromElement
     , genericSumTypeToText
     , genericSumTypeFromText
+    , genericEncConv
       -- * Options for generics
     , Options (Options, toElementName, toAttributeName, toContentSumType)
     , defaultOptions
@@ -59,7 +64,7 @@ module Network.InnerChange.XML.Types
     , readMaybeText
     ) where
 
-import           Control.Applicative ((<|>), Alternative, empty)
+import           Control.Applicative (Alternative, empty, (<|>))
 import           Data.Map            (Map)
 import qualified Data.Map            as Map (lookup, singleton, union)
 import           Data.Maybe          (fromMaybe)
@@ -68,9 +73,9 @@ import           Data.Proxy          (Proxy (Proxy))
 import           Data.Text           (Text)
 import qualified Data.Text           as Text (pack, unpack)
 import           GHC.Generics        ((:*:) ((:*:)), (:+:) (L1, R1), C1, D1,
-                                      Generic, K1 (K1), M1 (M1),
+                                      Generic, K1 (K1), M1 (M1), V1,
                                       Meta (MetaCons, MetaData, MetaSel), Rec0,
-                                      Rep, S1, U1 (U1), from, to)
+                                      Rep, S1, U1 (U1), from, to, unK1, unM1)
 import           GHC.TypeLits        (KnownSymbol, symbolVal)
 import           Text.Read           (Read)
 import qualified Text.Read           as Read (readMaybe)
@@ -405,7 +410,7 @@ genericFromElement opts e = (to . fst) <$> gFromElement opts (toPartial e)
 
 mapFst :: (a -> c) -> (a, b) -> (c, b)
 mapFst f (x, y) = (f x, y)
-    
+
 class GFromElement a where
     gFromElement :: Options -> PartialElement -> Result (a x, PartialElement)
 
@@ -520,7 +525,7 @@ instance ( GSumTypeFromElement a
     gsumTypeFromElement opts pe
         =   ((mapFst L1) <$> gsumTypeFromElement opts pe)
         <|> ((mapFst R1) <$> gsumTypeFromElement opts pe)
-    
+
 -------------------------------------------------------------------------------
 
 genericSumTypeToText :: ( Generic a
@@ -574,3 +579,65 @@ instance ( GSumTypeFromText a
     gsumTypeFromText opts text
         =   (L1 <$> gsumTypeFromText opts text)
         <|> (R1 <$> gsumTypeFromText opts text)
+
+-------------------------------------------------------------------------------
+
+class Conv a b where
+    conv :: a -> b
+
+    default conv :: (Generic a, Generic b, GEncConv (Rep a) (Rep b))
+                 => a -> b
+    conv = genericEncConv
+
+instance Conv a a where
+    conv = id
+
+instance Conv a (Attr a) where
+    conv = Attr
+
+instance Conv (Attr a) a where
+    conv = unAttr
+
+genericEncConv :: ( Generic a
+                  , Generic b
+                  , GEncConv (Rep a) (Rep b) )
+               => a -> b
+genericEncConv xa = to $ gencConv $ from xa
+
+class GEncConv a b where
+    gencConv :: a r -> b r
+
+instance Conv a b => GEncConv (K1 i a) (K1 j b) where
+    gencConv = K1 . conv . unK1
+
+instance GEncConv a b => GEncConv (M1 i c a) (M1 j d b) where
+    gencConv = M1 . gencConv . unM1
+
+instance GEncConv V1 V1 where
+    gencConv = id
+
+instance ( GEncConv f1 f2
+         , GEncConv g1 g2
+         ) => GEncConv (f1 :*: g1) (f2 :*: g2) where
+    gencConv (l :*: r) = gencConv l :*: gencConv r
+
+-------------------------------------------------------------------------------
+
+-- type family EncodeFor a
+    
+class Encode a where
+    type EncodeFor a
+    encode :: a -> EncodeFor a
+    decode :: EncodeFor a -> a
+
+    default encode :: ( Generic a
+                      , Generic (EncodeFor a)
+                      , GEncConv (Rep a) (Rep (EncodeFor a)) )
+                   => a -> (EncodeFor a)
+    encode = genericEncConv
+
+    default decode :: ( Generic a
+                      , Generic (EncodeFor a)
+                      , GEncConv (Rep (EncodeFor a)) (Rep a) )
+                   => (EncodeFor a) -> a
+    decode = genericEncConv
