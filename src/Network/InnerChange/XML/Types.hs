@@ -20,6 +20,8 @@ module Network.InnerChange.XML.Types
     , FromText (fromText)
     , ToNode (toNode)
     , FromNode (fromNode)
+    , ToAttrValue (toAttrValue)
+    , FromAttrValue (fromAttrValue)
       -- * Types
     , Attr (Attr, unAttr)
     , Result (Success, Failure)
@@ -42,6 +44,14 @@ module Network.InnerChange.XML.Types
     , genericFromElement
     , genericSumTypeToElement
     , genericSumTypeFromElement
+    , genericSumTypeToText
+    , genericSumTypeFromText
+      -- * Options for generics
+    , Options (Options, toElementName, toAttributeName, toContentSumType)
+    , defaultOptions
+    , toNameSimple
+    , OptionsText (OptionsText, constructorToText)
+    , defaultOptionsText
       -- * Helpers
     , toTextToNode
     , fromTextFromNode
@@ -49,6 +59,7 @@ module Network.InnerChange.XML.Types
     , readMaybeText
     ) where
 
+import           Control.Applicative ((<|>))
 import           Data.Map            (Map)
 import qualified Data.Map            as Map (lookup, singleton, union)
 import           Data.Maybe          (fromMaybe)
@@ -72,7 +83,7 @@ class ToElement a where
     toElement :: a -> XML.Element
 
     default toElement :: (Generic a, GToElement (Rep a)) => a -> XML.Element
-    toElement = genericToElement
+    toElement = genericToElement defaultOptions
 
 class FromElement a where
     fromElement :: XML.Element -> Result a
@@ -80,7 +91,7 @@ class FromElement a where
     default fromElement :: (Generic a, GFromElement (Rep a))
                         => XML.Element
                         -> Result a
-    fromElement = genericFromElement
+    fromElement = genericFromElement defaultOptions
 
 class ToText a where
     toText :: a -> Text
@@ -111,6 +122,26 @@ instance FromText Int where fromText = readMaybeText
 -------------------------------------------------------------------------------
 
 newtype Attr a = Attr { unAttr :: a } deriving (Eq, Show, Generic)
+
+data Options = Options
+    { toElementName    :: Text -> XML.Name
+    , toAttributeName  :: Text -> XML.Name
+    , toContentSumType :: Text -> Text }
+
+defaultOptions :: Options
+defaultOptions = Options toNameSimple toNameSimple id
+
+toNameSimple :: Text -> XML.Name
+toNameSimple t = XML.Name t Nothing Nothing
+
+symbolText :: (KnownSymbol s) => Proxy s -> Text
+symbolText = Text.pack . symbolVal
+
+data OptionsText = OptionsText
+    { constructorToText :: Text -> Text }
+
+defaultOptionsText :: OptionsText
+defaultOptionsText = OptionsText id
 
 -------------------------------------------------------------------------------
 
@@ -256,19 +287,17 @@ data PartialElement
 emptyPartialElement :: PartialElement
 emptyPartialElement = PartialElement Nothing mempty []
 
-partialElementName :: (KnownSymbol name)
-                   => Proxy name
-                   -> (PartialElement -> PartialElement)
-partialElementName p initPe = initPe { peName = (Just . symbolName) p }
+partialElementName :: XML.Name -> (PartialElement -> PartialElement)
+partialElementName name initPe = initPe { peName = Just name }
 
-addAttribute :: (KnownSymbol name, ToAttrValue a)
-             => Proxy name
+addAttribute :: (ToAttrValue a)
+             => XML.Name
              -> a
              -> (PartialElement -> PartialElement)
-addAttribute p x initPe = case toAttrValue x of
+addAttribute name x initPe = case toAttrValue x of
     Just v -> initPe { peAttrs = Map.union (peAttrs initPe) attr }
       where
-        attr = Map.singleton (symbolName p) v
+        attr = Map.singleton name v
     Nothing -> initPe
 
 addNodes :: ToNode a => a -> (PartialElement -> PartialElement)
@@ -319,53 +348,53 @@ takeNodes pe = rvalue
 
 -------------------------------------------------------------------------------
 
-symbolName :: (KnownSymbol s) => Proxy s -> XML.Name
-symbolName p = XML.Name (symbolText p) Nothing Nothing
-
-symbolText :: (KnownSymbol s) => Proxy s -> Text
-symbolText = Text.pack . symbolVal
-
--------------------------------------------------------------------------------
-
-genericToElement :: (Generic a, GToElement (Rep a)) => a -> XML.Element
-genericToElement x = freeze $ gToElement (from x) emptyPartialElement
+genericToElement :: (Generic a, GToElement (Rep a))
+                 => Options
+                 -> a
+                 -> XML.Element
+genericToElement opts x = freeze $ gToElement opts (from x) emptyPartialElement
 
 class GToElement a where
-    gToElement :: a x -> (PartialElement -> PartialElement)
+    gToElement :: Options -> a x -> (PartialElement -> PartialElement)
 
 instance ( KnownSymbol name
          , GToElement c
          ) => GToElement (D1 ('MetaData name x y z) c) where
-    gToElement (M1 c)
-        = (gToElement c) . (partialElementName (Proxy :: Proxy name))
+    gToElement opts (M1 c)
+        = (gToElement opts c) . (partialElementName elementName)
+      where
+        elementName = toElementName opts (symbolText (Proxy :: Proxy name))
 
 instance GToElement s => GToElement (C1 ('MetaCons name q w) s) where
-    gToElement (M1 sel)
-        = gToElement sel
+    gToElement opts (M1 sel)
+        = gToElement opts sel
 
 instance {-# OVERLAPS #-}
          ( KnownSymbol name
          , ToAttrValue a
          ) => GToElement (S1 ('MetaSel ('Just name) q w e)
                              (Rec0 (Attr a))) where
-    gToElement (M1 (K1 (Attr x)))
-        = addAttribute (Proxy :: Proxy name) x
+    gToElement opts (M1 (K1 (Attr x)))
+        = addAttribute attributeName x
+      where
+        attributeName = toAttributeName opts (symbolText (Proxy :: Proxy name))
 
 instance ToNode a
          => GToElement (S1 ('MetaSel ('Just name) q w e) (Rec0 a)) where
-    gToElement (M1 (K1 x)) = addNodes x
+    gToElement _ (M1 (K1 x)) = addNodes x
 
 instance ( GToElement a
          , GToElement b
          ) => GToElement (a :*: b) where
-    gToElement (a :*: b) = (gToElement b) . (gToElement a)
+    gToElement opts (a :*: b) = (gToElement opts b) . (gToElement opts a)
 
 -------------------------------------------------------------------------------
 
 genericFromElement :: (Generic a, GFromElement (Rep a))
-                   => XML.Element
+                   => Options
+                   -> XML.Element
                    -> Result a
-genericFromElement e = (to . fst) <$> gFromElement (toPartial e)
+genericFromElement opts e = (to . fst) <$> gFromElement opts (toPartial e)
 
 m1fst :: (f p, e) -> (M1 i c f p, e)
 m1fst (x, y) = (M1 x, y)
@@ -377,98 +406,168 @@ attrfst :: (a, e) -> (Attr a, e)
 attrfst (x, y) = (Attr x, y)
 
 class GFromElement a where
-    gFromElement :: PartialElement -> Result (a x, PartialElement)
+    gFromElement :: Options -> PartialElement -> Result (a x, PartialElement)
 
 instance ( KnownSymbol name
          , GFromElement c
          ) => GFromElement (D1 ('MetaData name x y z) c) where
-    gFromElement = fmap m1fst
-                 . whenElement (symbolName (Proxy :: Proxy name)) gFromElement
+    gFromElement opts
+        = fmap m1fst
+        . whenElement elementName (gFromElement opts)
+      where
+        elementName = toElementName opts (symbolText (Proxy :: Proxy name))
 
 instance GFromElement s
          => GFromElement (C1 ('MetaCons name q w) s) where
-    gFromElement = fmap m1fst . gFromElement
+    gFromElement opts = fmap m1fst . (gFromElement opts)
 
 instance {-# OVERLAPS #-}
          ( KnownSymbol name
          , FromAttrValue a
          ) => GFromElement (S1 ('MetaSel ('Just name) q w e)
                                (Rec0 (Attr a))) where
-    gFromElement = fmap (m1fst . k1fst . attrfst)
-                 . takeAttribute (symbolName (Proxy :: Proxy name))
+    gFromElement opts
+        = fmap (m1fst . k1fst . attrfst)
+        . takeAttribute attributeName
+      where
+        attributeName = toAttributeName opts (symbolText (Proxy :: Proxy name))
 
 instance FromNode a
          => GFromElement (S1 ('MetaSel ('Just name) q w e) (Rec0 a)) where
-    gFromElement = fmap (m1fst . k1fst) . takeNodes
+    gFromElement _ = fmap (m1fst . k1fst) . takeNodes
 
 instance ( GFromElement a
          , GFromElement b
          ) => GFromElement (a :*: b) where
-    gFromElement e = do
-        (l, e')  <- gFromElement e
-        (r, e'') <- gFromElement e'
+    gFromElement opts e = do
+        (l, e')  <- gFromElement opts e
+        (r, e'') <- gFromElement opts e'
         Success (l :*: r, e'')
 
 -------------------------------------------------------------------------------
 
 genericSumTypeToElement :: ( Generic a
                            , GSumTypeToElement (Rep a) )
-                        => a
+                        => Options
+                        -> a
                         -> XML.Element
-genericSumTypeToElement x = freeze
-                          $ gsumTypeToElement (from x) emptyPartialElement
+genericSumTypeToElement opts x
+    = freeze $ gsumTypeToElement opts (from x) emptyPartialElement
 
 class GSumTypeToElement a where
-    gsumTypeToElement :: a r -> (PartialElement -> PartialElement)
+    gsumTypeToElement :: Options -> a r -> (PartialElement -> PartialElement)
 
 instance ( KnownSymbol name
          , GSumTypeToElement c
          ) => GSumTypeToElement (D1 ('MetaData name x y z) c) where
-    gsumTypeToElement (M1 c) = (gsumTypeToElement c)
-                             . (partialElementName (Proxy :: Proxy name))
+    gsumTypeToElement opts (M1 c)
+        = (gsumTypeToElement opts c) . (partialElementName elementName)
+      where
+        elementName = toElementName opts (symbolText (Proxy :: Proxy name))
 
 instance ( KnownSymbol name
          ) => GSumTypeToElement (C1 ('MetaCons name x y) U1) where
-    gsumTypeToElement _ = addNodes (symbolText (Proxy :: Proxy name))
+    gsumTypeToElement opts _ = addNodes content
+      where
+        content = toContentSumType opts (symbolText (Proxy :: Proxy name))
 
 instance ( GSumTypeToElement a
          , GSumTypeToElement b
          ) => GSumTypeToElement (a :+: b) where
-    gsumTypeToElement (L1 x) = gsumTypeToElement x
-    gsumTypeToElement (R1 x) = gsumTypeToElement x
+    gsumTypeToElement opts (L1 x) = gsumTypeToElement opts x
+    gsumTypeToElement opts (R1 x) = gsumTypeToElement opts x
 
 -------------------------------------------------------------------------------
 
 genericSumTypeFromElement :: ( Generic a
                              , GSumTypeFromElement (Rep a) )
-                          => XML.Element
+                          => Options
+                          -> XML.Element
                           -> Result a
-genericSumTypeFromElement e = (to . fst) <$> gsumTypeFromElement (toPartial e)
+genericSumTypeFromElement opts e
+    = (to . fst) <$> gsumTypeFromElement opts (toPartial e)
 
 class GSumTypeFromElement a where
-    gsumTypeFromElement :: PartialElement -> Result (a x, PartialElement)
+    gsumTypeFromElement :: Options
+                        -> PartialElement
+                        -> Result (a x, PartialElement)
 
 instance ( KnownSymbol name
          , GSumTypeFromElement c
          ) => GSumTypeFromElement (D1 ('MetaData name x y z) c) where
-    gsumTypeFromElement = fmap m1fst
-                        . whenElement eName gsumTypeFromElement
+    gsumTypeFromElement opts
+        = fmap m1fst
+        . whenElement elementName (gsumTypeFromElement opts)
       where
-        eName = symbolName (Proxy :: Proxy name)
+        elementName = toElementName opts (symbolText (Proxy :: Proxy name))
 
 instance ( KnownSymbol name
          ) => GSumTypeFromElement (C1 ('MetaCons name x y) U1) where
-    gsumTypeFromElement pe
+    gsumTypeFromElement opts pe
         = takeNodes pe
-      >>= \(t, _) -> if t == eName
+      >>= \(t, _) -> if t == content
                      then Success (M1 U1, pe)
                      else Failure $ FailureParseContent t
       where
-        eName = symbolText (Proxy :: Proxy name)
+        content = toContentSumType opts (symbolText (Proxy :: Proxy name))
 
 instance ( GSumTypeFromElement a
          , GSumTypeFromElement b
          ) => GSumTypeFromElement (a :+: b) where
-    gsumTypeFromElement pe = case gsumTypeFromElement pe of
+    gsumTypeFromElement opts pe = case gsumTypeFromElement opts pe of
         Success (l, pe') -> Success (L1 l, pe')
-        _ -> gsumTypeFromElement pe >>= \(r, pe') -> Success (R1 r, pe')
+        _ -> gsumTypeFromElement opts pe >>= \(r, pe') -> Success (R1 r, pe')
+
+-------------------------------------------------------------------------------
+
+genericSumTypeToText :: ( Generic a
+                        , GSumTypeToText (Rep a) )
+                     => OptionsText
+                     -> a
+                     -> Text
+genericSumTypeToText opts = (gsumTypeToText opts) . from
+
+class GSumTypeToText a where
+    gsumTypeToText :: OptionsText -> a r -> Text
+
+instance GSumTypeToText c => GSumTypeToText (D1 z c) where
+    gsumTypeToText opts (M1 x) = gsumTypeToText opts x
+
+instance (KnownSymbol name) => GSumTypeToText (C1 ('MetaCons name x y) U1) where
+    gsumTypeToText opts _
+        = constructorToText opts (symbolText (Proxy :: Proxy name))
+
+instance (GSumTypeToText a, GSumTypeToText b) => GSumTypeToText (a :+: b) where
+    gsumTypeToText opts (L1 x) = gsumTypeToText opts x
+    gsumTypeToText opts (R1 x) = gsumTypeToText opts x
+
+-------------------------------------------------------------------------------
+
+genericSumTypeFromText :: ( Generic a
+                          , GSumTypeFromText (Rep a) )
+                       => OptionsText
+                       -> Text
+                       -> Maybe a
+genericSumTypeFromText opts text = to <$> gsumTypeFromText opts text
+
+class GSumTypeFromText a where
+    gsumTypeFromText :: OptionsText -> Text -> Maybe (a r)
+
+instance GSumTypeFromText c => GSumTypeFromText (D1 z c) where
+    gsumTypeFromText opts = (fmap M1) . (gsumTypeFromText opts)
+
+instance ( KnownSymbol name
+         ) => GSumTypeFromText (C1 ('MetaCons name x y) U1) where
+    gsumTypeFromText opts text
+        = if text == cName
+          then Just (M1 U1)
+          else Nothing
+      where
+        cName = constructorToText opts (symbolText (Proxy :: Proxy name))
+
+instance ( GSumTypeFromText a
+         , GSumTypeFromText b
+         ) => GSumTypeFromText (a :+: b) where
+    gsumTypeFromText opts text
+        =   (L1 <$> gsumTypeFromText opts text)
+        <|> (R1 <$> gsumTypeFromText opts text)
