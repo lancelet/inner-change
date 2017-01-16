@@ -622,8 +622,6 @@ instance ( GEncConv f1 f2
     gencConv (l :*: r) = gencConv l :*: gencConv r
 
 -------------------------------------------------------------------------------
-
--- type family EncodeFor a
     
 class Encode a where
     type EncodeFor a
