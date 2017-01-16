@@ -59,7 +59,7 @@ module Network.InnerChange.XML.Types
     , readMaybeText
     ) where
 
-import           Control.Applicative ((<|>))
+import           Control.Applicative ((<|>), Alternative, empty)
 import           Data.Map            (Map)
 import qualified Data.Map            as Map (lookup, singleton, union)
 import           Data.Maybe          (fromMaybe)
@@ -156,6 +156,12 @@ instance Applicative Result where
     _         <*> Failure f = Failure f
     Success f <*> Success x = Success (f x)
 
+instance Alternative Result where
+    empty = Failure $ FailureAlternativeEmpty
+    Success v <|> _         = Success v
+    Failure _ <|> Success v = Success v
+    Failure _ <|> Failure f = Failure f
+
 instance Monad Result where
     Failure f >>= _ = Failure f
     Success x >>= f = f x
@@ -171,6 +177,7 @@ data FailureDetails
     { fmnExpected :: NodeType }
     | FailureParseContent
     { fpcText :: Text }
+    | FailureAlternativeEmpty
     deriving (Eq, Show)
 
 newtype ElementName = ElementName XML.Name
@@ -396,15 +403,9 @@ genericFromElement :: (Generic a, GFromElement (Rep a))
                    -> Result a
 genericFromElement opts e = (to . fst) <$> gFromElement opts (toPartial e)
 
-m1fst :: (f p, e) -> (M1 i c f p, e)
-m1fst (x, y) = (M1 x, y)
-
-k1fst :: (c, e) -> (K1 i c p, e)
-k1fst (x, y) = (K1 x, y)
-
-attrfst :: (a, e) -> (Attr a, e)
-attrfst (x, y) = (Attr x, y)
-
+mapFst :: (a -> c) -> (a, b) -> (c, b)
+mapFst f (x, y) = (f x, y)
+    
 class GFromElement a where
     gFromElement :: Options -> PartialElement -> Result (a x, PartialElement)
 
@@ -412,14 +413,14 @@ instance ( KnownSymbol name
          , GFromElement c
          ) => GFromElement (D1 ('MetaData name x y z) c) where
     gFromElement opts
-        = fmap m1fst
+        = fmap (mapFst M1)
         . whenElement elementName (gFromElement opts)
       where
         elementName = toElementName opts (symbolText (Proxy :: Proxy name))
 
 instance GFromElement s
          => GFromElement (C1 ('MetaCons name q w) s) where
-    gFromElement opts = fmap m1fst . (gFromElement opts)
+    gFromElement opts = fmap (mapFst M1) . (gFromElement opts)
 
 instance {-# OVERLAPS #-}
          ( KnownSymbol name
@@ -427,14 +428,14 @@ instance {-# OVERLAPS #-}
          ) => GFromElement (S1 ('MetaSel ('Just name) q w e)
                                (Rec0 (Attr a))) where
     gFromElement opts
-        = fmap (m1fst . k1fst . attrfst)
+        = fmap ((mapFst M1) . (mapFst K1) . (mapFst Attr))
         . takeAttribute attributeName
       where
         attributeName = toAttributeName opts (symbolText (Proxy :: Proxy name))
 
 instance FromNode a
          => GFromElement (S1 ('MetaSel ('Just name) q w e) (Rec0 a)) where
-    gFromElement _ = fmap (m1fst . k1fst) . takeNodes
+    gFromElement _ = fmap ((mapFst M1) . (mapFst K1)) . takeNodes
 
 instance ( GFromElement a
          , GFromElement b
@@ -487,6 +488,8 @@ genericSumTypeFromElement :: ( Generic a
 genericSumTypeFromElement opts e
     = (to . fst) <$> gsumTypeFromElement opts (toPartial e)
 
+
+
 class GSumTypeFromElement a where
     gsumTypeFromElement :: Options
                         -> PartialElement
@@ -496,7 +499,7 @@ instance ( KnownSymbol name
          , GSumTypeFromElement c
          ) => GSumTypeFromElement (D1 ('MetaData name x y z) c) where
     gsumTypeFromElement opts
-        = fmap m1fst
+        = fmap (mapFst M1)
         . whenElement elementName (gsumTypeFromElement opts)
       where
         elementName = toElementName opts (symbolText (Proxy :: Proxy name))
@@ -514,10 +517,10 @@ instance ( KnownSymbol name
 instance ( GSumTypeFromElement a
          , GSumTypeFromElement b
          ) => GSumTypeFromElement (a :+: b) where
-    gsumTypeFromElement opts pe = case gsumTypeFromElement opts pe of
-        Success (l, pe') -> Success (L1 l, pe')
-        _ -> gsumTypeFromElement opts pe >>= \(r, pe') -> Success (R1 r, pe')
-
+    gsumTypeFromElement opts pe
+        =   ((mapFst L1) <$> gsumTypeFromElement opts pe)
+        <|> ((mapFst R1) <$> gsumTypeFromElement opts pe)
+    
 -------------------------------------------------------------------------------
 
 genericSumTypeToText :: ( Generic a
