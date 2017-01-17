@@ -1,4 +1,4 @@
--- {-# OPTIONS_GHC -Wwarn #-}
+{-# OPTIONS_GHC -Wwarn #-}
 {-# LANGUAGE DataKinds             #-}
 {-# LANGUAGE DefaultSignatures     #-}
 {-# LANGUAGE DeriveFunctor         #-}
@@ -21,8 +21,10 @@ module Network.InnerChange.XML.Types
     , FromText (fromText)
     , ToNode (toNode)
     , FromNode (fromNode)
+    , FromNodes' (fromNodesKnownOrder, fromNodesUnknownOrder)
     , ToAttrValue (toAttrValue)
     , FromAttrValue (fromAttrValue)
+    , FromAttrValue' (fromAttrValue')
     , Conv (conv)
     , Encode (encode, decode)
     , EncodeFor
@@ -43,6 +45,13 @@ module Network.InnerChange.XML.Types
     , ElementName (ElementName)
     , AttributeName (AttributeName)
     , NodeType (NodeTypeElement, NodeTypeContent)
+      --
+    , Result' (Success', Failure')
+    , RootFailure (FailExpectedElement, FailExpectedContent,
+                   FailCouldNotParseAttribute, FailMissingAttribute,
+                   FailMissingContent)
+    , rootFail
+    , maybeFail'
       -- * Generics
     , genericToElement
     , genericFromElement
@@ -98,6 +107,10 @@ class FromElement a where
                         -> Result a
     fromElement = genericFromElement defaultOptions
 
+class FromElement' a where
+    fromElement' :: XML.Element -> Result' a
+
+
 class ToText a where
     toText :: a -> Text
 
@@ -109,6 +122,13 @@ class ToNode a where
 
 class FromNode a where
     fromNode :: [XML.Node] -> (Result a, [XML.Node])
+
+class ToNodes' a where
+    toNodes' :: a -> [XML.Node]
+
+class FromNodes' a where
+    fromNodesKnownOrder   :: [XML.Node] -> (Result' a, [XML.Node])
+    fromNodesUnknownOrder :: [XML.Node] -> (Result' a, [XML.Node])
 
 -------------------------------------------------------------------------------
 
@@ -201,11 +221,48 @@ data NodeType
 
 -------------------------------------------------------------------------------
 
+data Result' a = Success' a
+               | Failure' [XML.Element] RootFailure
+               deriving (Eq, Show, Functor)
+
+instance Applicative Result' where
+    pure = Success'
+    Success' f    <*> Success' x    = Success' (f x)
+    _             <*> Failure' es r = Failure' es r
+    Failure' es r <*> _             = Failure' es r
+
+instance Monad Result' where
+    Failure' ea r >>= _ = Failure' ea r
+    Success' x    >>= f = f x
+
+trackFailure :: (XML.Element -> Result' a) -> XML.Element -> Result' a
+trackFailure f e = case f e of
+    s@(Success' _) -> s
+    Failure' es r  -> Failure' (e : es) r
+
+data RootFailure = FailExpectedElement ElementName
+                 | FailExpectedContent
+                 | FailCouldNotParseAttribute AttributeName Text
+                 | FailMissingAttribute AttributeName
+                 | FailMissingContent
+                 deriving (Eq, Show)
+
+rootFail :: RootFailure -> Result' a
+rootFail = Failure' []
+
+maybeFail' :: RootFailure -> Maybe a -> Result' a
+maybeFail' r = maybe (rootFail r) Success'
+
+-------------------------------------------------------------------------------
+
 class ToAttrValue a where
     toAttrValue :: a -> Maybe Text
 
 class FromAttrValue a where
     fromAttrValue :: Maybe Text -> Maybe a
+
+class FromAttrValue' a where
+    fromAttrValue' :: AttributeName -> Maybe Text -> Result' a
 
 -------------------------------------------------------------------------------
 
